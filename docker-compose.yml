@@ -1,6 +1,6 @@
 services:
   gluetun:
-    image: qmcgaw/gluetun
+    image: qmcgaw/gluetun:latest
     container_name: gluetun
     cap_add:
       - NET_ADMIN
@@ -14,7 +14,7 @@ services:
       - "8388:8388/udp" # Shadowsocks
 
   gluetun-gui:
-    build: .
+    image: raddadengineer/gluetun-gui:latest
     container_name: gluetun-gui
     restart: unless-stopped
     ports:

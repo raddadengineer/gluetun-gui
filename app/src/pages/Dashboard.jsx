@@ -125,6 +125,37 @@ export default function Dashboard() {
     };
   }, []);
 
+  const toggleSetting = async (key, currentValue) => {
+    setLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      // 1. Fetch current full config to avoid overwriting other settings
+      const res = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${token}` } });
+      const currentConfig = await res.json();
+      
+      // 2. Toggle value
+      const newValue = currentValue === 'on' ? 'off' : 'on';
+      const updatedConfig = { ...currentConfig, [key]: newValue };
+
+      // 3. Save new config
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(updatedConfig)
+      });
+
+      // 4. Refresh status to update UI
+      await fetchStatus();
+    } catch (err) {
+      console.error("Error toggling setting:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleRestart = async () => {
     setLoading(true);
     try {
@@ -292,7 +323,6 @@ export default function Dashboard() {
       </div>
 
       <div className="dashboard-grid" style={{ marginTop: '24px' }}>
-
         <div className="glass-panel control-section">
           <h3><span className="material-icons-round">router</span> Internal Network</h3>
           <div className="toggle-switch-container">
@@ -301,7 +331,12 @@ export default function Dashboard() {
               <span>Port 8388 • SOCKS5</span>
             </div>
             <label className="switch">
-              <input type="checkbox" defaultChecked />
+              <input 
+                type="checkbox" 
+                checked={status?.parsedEnv?.SHADOWSOCKS === 'on'} 
+                onChange={() => toggleSetting('SHADOWSOCKS', status?.parsedEnv?.SHADOWSOCKS || 'off')} 
+                disabled={loading} 
+              />
               <span className="slider"></span>
             </label>
           </div>
@@ -311,7 +346,12 @@ export default function Dashboard() {
               <span>Port 8888 • HTTP Tunnelling</span>
             </div>
             <label className="switch">
-              <input type="checkbox" defaultChecked />
+              <input 
+                type="checkbox" 
+                checked={status?.parsedEnv?.HTTPPROXY === 'on'} 
+                onChange={() => toggleSetting('HTTPPROXY', status?.parsedEnv?.HTTPPROXY || 'off')} 
+                disabled={loading} 
+              />
               <span className="slider"></span>
             </label>
           </div>
@@ -321,7 +361,12 @@ export default function Dashboard() {
               <span>DNS Blocklists Enabled</span>
             </div>
             <label className="switch">
-              <input type="checkbox" defaultChecked />
+              <input 
+                type="checkbox" 
+                checked={status?.parsedEnv?.BLOCK_ADS === 'on'} 
+                onChange={() => toggleSetting('BLOCK_ADS', status?.parsedEnv?.BLOCK_ADS || 'off')} 
+                disabled={loading} 
+              />
               <span className="slider"></span>
             </label>
           </div>
