@@ -17,6 +17,10 @@ export default function Sidebar() {
           <span className="material-icons-round">terminal</span>
           Logs
         </NavLink>
+        <NavLink to="/network" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+          <span className="material-icons-round">network_check</span>
+          Network
+        </NavLink>
         <NavLink to="/settings" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
           <span className="material-icons-round">settings</span>
           Settings

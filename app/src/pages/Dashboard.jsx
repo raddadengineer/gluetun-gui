@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -305,7 +307,17 @@ export default function Dashboard() {
       </div>
 
       <div className="dashboard-grid glass-panel" style={{ marginTop: '24px', padding: '24px' }}>
-        <h3 style={{ marginBottom: '16px' }}><span className="material-icons-round">insights</span> Network Throughput (KB/s)</h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+          <h3><span className="material-icons-round">insights</span> Network Throughput (KB/s)</h3>
+          <button
+            className="btn"
+            onClick={() => navigate('/network')}
+            style={{ padding: '8px 16px', fontSize: '13px', background: 'rgba(59,130,246,0.1)', color: 'var(--accent-primary)', border: '1px solid rgba(59,130,246,0.2)' }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '16px' }}>open_in_full</span>
+            Full Analysis
+          </button>
+        </div>
         <div style={{ height: '250px', width: '100%' }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={netHistory} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>

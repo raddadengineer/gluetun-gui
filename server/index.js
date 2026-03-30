@@ -13,6 +13,87 @@ app.use(express.json());
 // Hardcoded for local GUI, but perfectly limits unauthorized access
 const JWT_SECRET = 'gluetun-gui-super-secret-key';
 const ENV_PATH = path.join(__dirname, '.env');
+const SESSIONS_PATH = path.join(__dirname, 'sessions.json');
+
+// ─── Session Tracking ─────────────────────────────────────────────────────────
+let sessions = [];
+let currentSession = null;
+let lastKnownContainerId = null;
+// baselines: { tun0: { rx, tx }, eth0: { rx, tx } } at session start
+let sessionBaselines = {};
+
+function loadSessions() {
+    try {
+        if (fs.existsSync(SESSIONS_PATH)) {
+            sessions = JSON.parse(fs.readFileSync(SESSIONS_PATH, 'utf8'));
+            // Keep last 100 sessions
+            if (sessions.length > 100) sessions = sessions.slice(-100);
+            // Find any previously active session and mark it ended (server restart)
+            sessions = sessions.map(s => s.active ? { ...s, active: false, endedAt: s.endedAt || new Date().toISOString() } : s);
+            saveSessions();
+        }
+    } catch (e) {
+        console.error('[Sessions] Failed to load sessions.json:', e.message);
+        sessions = [];
+    }
+}
+
+function saveSessions() {
+    try {
+        fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[Sessions] Failed to save sessions.json:', e.message);
+    }
+}
+
+function startNewSession(containerId, startedAt, envVars) {
+    // Close previous session
+    if (currentSession) {
+        currentSession.active = false;
+        currentSession.endedAt = new Date().toISOString();
+    }
+
+    currentSession = {
+        id: `sess_${Date.now()}`,
+        containerId,
+        startedAt: startedAt || new Date().toISOString(),
+        endedAt: null,
+        active: true,
+        provider: envVars.VPN_SERVICE_PROVIDER || 'unknown',
+        vpnType: envVars.VPN_TYPE || 'wireguard',
+        region: envVars.SERVER_COUNTRIES || envVars.SERVER_REGIONS || envVars.SERVER_NAMES || 'auto',
+        // interface-level bytes delta (filled by updateCurrentSession)
+        interfaces: {}
+    };
+
+    sessions.push(currentSession);
+    sessionBaselines = {}; // reset baselines for new session
+    saveSessions();
+    console.log(`[Sessions] New session started: ${currentSession.id}`);
+}
+
+function updateCurrentSession(networks) {
+    if (!currentSession) return;
+    const ifaces = Object.keys(networks);
+    ifaces.forEach(iface => {
+        const net = networks[iface];
+        if (!sessionBaselines[iface]) {
+            sessionBaselines[iface] = { rx: net.rx_bytes, tx: net.tx_bytes };
+        }
+        const rxDelta = Math.max(0, net.rx_bytes - sessionBaselines[iface].rx);
+        const txDelta = Math.max(0, net.tx_bytes - sessionBaselines[iface].tx);
+        currentSession.interfaces[iface] = { rx: rxDelta, tx: txDelta };
+    });
+    // Throttle saves: only write every ~30s
+    const now = Date.now();
+    if (!currentSession._lastSave || now - currentSession._lastSave > 30000) {
+        currentSession._lastSave = now;
+        saveSessions();
+    }
+}
+
+// Load persisted sessions on startup
+loadSessions();
 
 // Initialize Docker instance
 const docker = new Docker();
@@ -73,6 +154,17 @@ app.get('/api/status', authenticateToken, async (req, res) => {
 
         const containerInfo = await docker.getContainer(gluetun.Id).inspect();
 
+        // ── Session tracking: detect new container (restart/recreate) ──
+        if (containerInfo.State.Status === 'running' && containerInfo.Id !== lastKnownContainerId) {
+            lastKnownContainerId = containerInfo.Id;
+            const envVars = {};
+            (containerInfo.Config.Env || []).forEach(e => {
+                const [k, ...rest] = e.split('=');
+                envVars[k] = rest.join('=');
+            });
+            startNewSession(containerInfo.Id, containerInfo.State.StartedAt, envVars);
+        }
+
         res.json({
             status: containerInfo.State.Status,
             id: containerInfo.Id,
@@ -96,10 +188,38 @@ app.get('/api/metrics', authenticateToken, async (req, res) => {
 
         const container = docker.getContainer(gluetun.Id);
         const stats = await container.stats({ stream: false });
+
+        // Update session bandwidth accounting with per-interface data
+        if (stats.networks) updateCurrentSession(stats.networks);
+
         res.json(stats);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
+});
+
+// ── Session History API ────────────────────────────────────────────────────────
+app.get('/api/sessions', authenticateToken, (req, res) => {
+    // Return sessions newest-first, strip internal _lastSave field
+    const clean = [...sessions].reverse().map(({ _lastSave, ...s }) => s);
+    res.json(clean);
+});
+
+app.delete('/api/sessions/:id', authenticateToken, (req, res) => {
+    const { id } = req.params;
+    if (currentSession && currentSession.id === id) {
+        return res.status(400).json({ error: 'Cannot delete the active session.' });
+    }
+    sessions = sessions.filter(s => s.id !== id);
+    saveSessions();
+    res.json({ message: 'Session deleted.' });
+});
+
+app.delete('/api/sessions', authenticateToken, (req, res) => {
+    // Clear all except the active one
+    sessions = currentSession ? [currentSession] : [];
+    saveSessions();
+    res.json({ message: 'Session history cleared.' });
 });
 
 app.post('/api/restart', authenticateToken, async (req, res) => {

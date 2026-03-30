@@ -5,6 +5,7 @@ import Dashboard from './pages/Dashboard';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
+import Network from './pages/Network';
 
 // Global fetch wrapper to handle JWT expiration seamlessly
 const originalFetch = window.fetch;
@@ -48,6 +49,7 @@ function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/logs" element={<Logs />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/network" element={<Network />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

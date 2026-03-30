@@ -7,11 +7,12 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     env_file:
-      - ./gluetun.env
+      - path: ./gluetun.env
+        required: false        # File is created automatically by the GUI on first save
     ports:
-      - "8888:8888/tcp" # HTTP proxy
-      - "8388:8388/tcp" # Shadowsocks
-      - "8388:8388/udp" # Shadowsocks
+      - "8888:8888/tcp"       # HTTP proxy
+      - "8388:8388/tcp"       # Shadowsocks
+      - "8388:8388/udp"       # Shadowsocks
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
@@ -22,10 +23,9 @@ services:
     volumes:
       # MANDATORY: Required for the GUI to monitor and control the Gluetun container
       - /var/run/docker.sock:/var/run/docker.sock
-      # Optional: Bind-mount a persistent file to store GUI Settings across container resets
-      # First, touch gui-settings.env on your host machine, then uncomment the line below:
+      # Persistent GUI settings (password, PIA credentials, proxy toggles, etc.)
       - ./gui-settings.env:/usr/src/app/.env
-      # REQUIRED for pia-wg-refresh features: Provide access to the Gluetun config directory
+      # REQUIRED for PIA WireGuard key generation and Gluetun config management
       - ./gluetun-config:/config
       - ./gluetun.env:/gluetun.env
     depends_on:
