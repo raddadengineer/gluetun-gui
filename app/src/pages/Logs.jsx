@@ -1,35 +1,43 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 
 export default function Logs() {
   const [logs, setLogs] = useState([]);
+  const [filter, setFilter] = useState('');
   const [wordWrap, setWordWrap] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [logLevel, setLogLevel] = useState('info');
+  const [loadingConfig, setLoadingConfig] = useState(false);
   const bottomRef = useRef(null);
+  const logsContainerRef = useRef(null);
 
   useEffect(() => {
+    // Fetch initial log level
     const token = localStorage.getItem('token');
+    fetch('/api/config', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (data.LOG_LEVEL) setLogLevel(data.LOG_LEVEL);
+      })
+      .catch(console.error);
+
     const eventSource = new EventSource(`/api/logs?token=${token}`);
 
     eventSource.onmessage = (event) => {
-      // Data from SSE arrives as escaped string, parse to unescape
       try {
-        const line = JSON.parse(event.data);
+        let line = JSON.parse(event.data);
         if (line && line.trim() !== '') {
           setLogs((prev) => {
             const newLogs = [...prev, line];
-            // Keep performance smooth by retaining only the last 1500 lines
-            if (newLogs.length > 1500) return newLogs.slice(newLogs.length - 1500);
+            if (newLogs.length > 2000) return newLogs.slice(newLogs.length - 2000);
             return newLogs;
           });
         }
       } catch (e) {
-        // Fallback if parsing fails
+        // Fallback
       }
     };
 
-    return () => {
-      eventSource.close();
-    };
+    return () => eventSource.close();
   }, []);
 
   useEffect(() => {
@@ -38,14 +46,89 @@ export default function Logs() {
     }
   }, [logs, autoScroll]);
 
+  const toggleDebugging = async () => {
+    setLoadingConfig(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${token}` } });
+      const currentConfig = await res.json();
+      
+      const newLevel = logLevel === 'debug' ? 'info' : 'debug';
+      const updatedConfig = { ...currentConfig, LOG_LEVEL: newLevel };
+
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(updatedConfig)
+      });
+      
+      setLogLevel(newLevel);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingConfig(false);
+    }
+  };
+
+  const filteredLogs = useMemo(() => {
+    if (!filter) return logs;
+    const lowerFilter = filter.toLowerCase();
+    return logs.filter(l => l.toLowerCase().includes(lowerFilter));
+  }, [logs, filter]);
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      <header className="header" style={{ marginBottom: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '20px' }}>
+      <header className="header" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div className="header-title">
-          <h2>Container Logs</h2>
-          <p>Real-time stdout/stderr from the Gluetun Engine</p>
+          <h2>System Logs</h2>
+          <p>Real-time multiplexed output from Gluetun and the GUI</p>
         </div>
-        <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
+        
+        <div className="toggle-switch-container" style={{
+          background: 'rgba(0,0,0,0.2)', padding: '12px 20px', borderRadius: '12px', border: '1px solid var(--glass-border)', margin: 0, width: 'auto'
+        }}>
+          <div className="toggle-info" style={{ marginRight: '16px' }}>
+            <strong style={{ fontSize: '14px', color: logLevel === 'debug' ? 'var(--accent-primary)' : 'inherit', marginLeft: '4px' }}>
+              <span className="material-icons-round" style={{ fontSize: '18px', verticalAlign: 'middle', marginRight: '6px' }}>bug_report</span>
+              Verbose Debugging
+            </strong>
+          </div>
+          <label className="switch" style={{ margin: 0 }}>
+            <input 
+              type="checkbox" 
+              checked={logLevel === 'debug'} 
+              onChange={toggleDebugging} 
+              disabled={loadingConfig} 
+            />
+            <span className="slider"></span>
+          </label>
+        </div>
+      </header>
+
+      <div style={{ 
+        display: 'flex', gap: '20px', alignItems: 'center', 
+        background: 'var(--glass-bg)', padding: '12px 20px', borderRadius: '12px', 
+        border: '1px solid var(--glass-border)' 
+      }}>
+        <div style={{ flex: 1, position: 'relative' }}>
+          <span className="material-icons-round" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)', fontSize: '20px' }}>search</span>
+          <input 
+            type="text" 
+            placeholder="Filter logs by keyword..." 
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            style={{ 
+              width: '100%', padding: '10px 12px 10px 42px', borderRadius: '8px', 
+              border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.3)', 
+              color: '#fff', outline: 'none', fontSize: '14px' 
+            }}
+          />
+        </div>
+        
+        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '14px' }}>
             <input type="checkbox" checked={wordWrap} onChange={(e) => setWordWrap(e.target.checked)} />
             Word Wrap
@@ -54,20 +137,26 @@ export default function Logs() {
             <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
             Auto-Scroll Bottom
           </label>
+          <button onClick={() => setLogs([])} className="btn" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', padding: '8px 16px', fontSize: '14px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>delete_sweep</span> Clear
+          </button>
         </div>
-      </header>
+      </div>
 
       <div className="glass-panel" style={{
         flex: 1,
         display: 'flex',
         flexDirection: 'column',
-        background: 'rgba(5, 5, 8, 0.85)',
-        border: '1px solid rgba(255, 255, 255, 0.1)',
-        overflow: 'hidden'
+        background: '#0d1117',
+        border: '1px solid rgba(255, 255, 255, 0.15)',
+        overflow: 'hidden',
+        boxShadow: 'inset 0 0 20px rgba(0,0,0,0.5)',
+        borderRadius: '12px'
       }}>
         <div style={{
           padding: '12px 20px',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.05)',
+          background: '#161b22',
+          borderBottom: '1px solid #30363d',
           display: 'flex',
           gap: '8px'
         }}>
@@ -76,32 +165,58 @@ export default function Logs() {
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#27c93f' }} />
         </div>
 
-        <div style={{
+        <div ref={logsContainerRef} style={{
           flex: 1,
-          padding: '20px',
+          padding: '16px 0',
           overflowY: 'auto',
-          fontFamily: '"Fira Code", "JetBrains Mono", Consolas, monospace',
+          fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
           fontSize: '13px',
-          color: '#e2e8f0',
-          lineHeight: '1.5'
+          lineHeight: '1.6',
+          color: '#c9d1d9'
         }}>
-          {logs.map((log, index) => {
-            // Apply log severity color coding
-            let color = '#e2e8f0';
+          {filteredLogs.map((log, index) => {
+            let color = '#c9d1d9';
             const text = log.toLowerCase();
-            if (text.includes('fatal') || text.includes('panic')) color = '#dc2626'; // deeper red
-            else if (text.includes('error')) color = '#ef4444';
-            else if (text.includes('warn')) color = '#f59e0b';
-            else if (text.includes('info')) color = '#3b82f6';
-            else if (text.includes('debug')) color = '#a855f7'; // purple
+            if (text.includes('fatal') || text.includes('panic')) color = '#ff7b72'; 
+            else if (text.includes('error')) color = '#f85149';
+            else if (text.includes('warn')) color = '#d29922';
+            else if (text.includes('info')) color = '#58a6ff';
+            else if (text.includes('debug')) color = '#bc8cff';
+
+            // Parse multiplexer prefix
+            let prefixMatch = log.match(/^\[(.*?)\]\s(.*)/);
+            let source = 'SYS';
+            let message = log;
+            
+            if (prefixMatch) {
+              source = prefixMatch[1];
+              message = prefixMatch[2];
+            }
 
             return (
-              <div key={index} style={{ whiteSpace: wordWrap ? 'pre-wrap' : 'pre', wordBreak: wordWrap ? 'break-all' : 'normal', color }}>
-                {log}
+              <div key={index} className="log-row" style={{ 
+                display: 'flex',
+                padding: '2px 20px',
+                whiteSpace: wordWrap ? 'pre-wrap' : 'pre', 
+                wordBreak: wordWrap ? 'break-all' : 'normal',
+                borderBottom: '1px solid rgba(255,255,255,0.02)'
+              }}>
+                <span style={{ 
+                  marginRight: '16px', 
+                  color: source === 'VPN' ? '#3fb950' : '#a5d6ff',
+                  fontWeight: 'bold',
+                  flexShrink: 0,
+                  width: '45px',
+                  display: 'inline-block'
+                }}>
+                  [{source}]
+                </span>
+                <span style={{ color, flex: 1, wordBreak: 'break-word' }}>{message}</span>
               </div>
             );
           })}
-          {logs.length === 0 && <div style={{ color: '#8b92a5', fontStyle: 'italic' }}>Waiting for log stream... Is Gluetun running?</div>}
+          {logs.length === 0 && <div style={{ color: '#8b949e', fontStyle: 'italic', padding: '16px 20px' }}>Listening for log streams...</div>}
+          {logs.length > 0 && filteredLogs.length === 0 && <div style={{ color: '#8b949e', fontStyle: 'italic', padding: '16px 20px' }}>No logs match the current filter "{filter}".</div>}
           <div ref={bottomRef} style={{ height: '1px' }} />
         </div>
       </div>
