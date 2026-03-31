@@ -13,7 +13,8 @@ export default function Settings() {
   const [piaPortForwarding, setPiaPortForwarding] = useState(false);
   const [piaGenerating, setPiaGenerating] = useState(false);
   const [piaStatus, setPiaStatus] = useState(null);
-  const [piaRegions, setPiaRegions] = useState([]);
+  const [piaRegions, setPiaRegions] = useState([]);         // WireGuard regions (from PIA API)
+  const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // OpenVPN regions (from gluetun servers.json)
 
   // Dynamic server options state
   const [serverOptions, setServerOptions] = useState({ countries: [], regions: [], cities: [], hostnames: [], server_names: [] });
@@ -40,7 +41,7 @@ export default function Settings() {
       .then(data => setPiaStatus(data))
       .catch(console.error);
 
-    // Fetch PIA regions via backend proxy (avoids CORS)
+    // Fetch PIA WireGuard regions via backend proxy (avoids CORS)
     fetch('/api/pia/regions')
       .then(r => r.json())
       .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
@@ -52,6 +53,24 @@ export default function Settings() {
       .then(r => r.json())
       .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
       .catch(console.error);
+  };
+
+  const fetchPiaOpenVpnRegions = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(
+        '/api/helpers/servers?provider=private%20internet%20access&vpnType=openvpn',
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        // PIA OpenVPN uses SERVER_REGIONS — combine regions + countries for a full list
+        const combined = Array.from(new Set([...data.regions, ...data.countries])).sort((a,b) => a.localeCompare(b));
+        setPiaOpenVpnRegions(combined);
+      }
+    } catch (e) {
+      console.error('Failed to fetch PIA OpenVPN regions:', e);
+    }
   };
 
   const fetchServerOptions = async () => {
@@ -370,9 +389,258 @@ export default function Settings() {
                 </div>
               </div>
 
-              {/* Show Server Configs for all providers universally */}
-              <>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
+              {/* ── PIA Provider: Either/Or WireGuard or OpenVPN panels, no generic blocks ── */}
+              {config.VPN_SERVICE_PROVIDER === 'private internet access' ? (
+                <>
+                  {/* PIA WireGuard Panel */}
+                  {(config.VPN_TYPE || 'wireguard') === 'wireguard' && (
+                    <>
+                      <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '4px 0' }} />
+                      <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid var(--glass-highlight)' }}>
+                        <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                          <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
+                          PIA WireGuard — credentials generate ephemeral keys automatically. Regions rotate via auto-failover when the VPN fails.
+                        </p>
+                      </div>
+
+                      {piaStatus && piaStatus.state !== 'idle' && (
+                        <div style={{
+                          padding: '16px', borderRadius: '10px',
+                          background: piaStatus.state === 'success' ? 'rgba(16, 185, 129, 0.1)' : piaStatus.state === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+                          border: `1px solid ${piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)'}`,
+                          display: 'flex', alignItems: 'center', gap: '12px'
+                        }}>
+                          <span className="material-icons-round" style={{ color: piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)' }}>
+                            {piaStatus.state === 'success' ? 'check_circle' : piaStatus.state === 'error' ? 'error' : 'hourglass_top'}
+                          </span>
+                          <div>
+                            <strong style={{ fontSize: '14px' }}>{piaStatus.state === 'success' ? 'Connected' : piaStatus.state === 'error' ? 'Error' : 'Working...'}</strong>
+                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{piaStatus.message}</p>
+                            {piaStatus.lastGenerated && <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>Last generated: {new Date(piaStatus.lastGenerated).toLocaleString()}</p>}
+                          </div>
+                        </div>
+                      )}
+
+                      <h3 style={{ fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: 0 }}>
+                        <span className="material-icons-round" style={{ color: 'var(--accent-primary)', fontSize: '20px' }}>key</span>
+                        PIA Account Credentials
+                      </h3>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                        <div className="form-group">
+                          <label>PIA Username (p-number)</label>
+                          <input type="text" value={piaUsername} onChange={e => setPiaUsername(e.target.value)} className="text-input" placeholder="p1234567" />
+                        </div>
+                        <div className="form-group">
+                          <label>PIA Password</label>
+                          <input type="password" value={piaPassword} onChange={e => setPiaPassword(e.target.value)} className="text-input" placeholder="Your PIA password" />
+                        </div>
+                      </div>
+
+                      {/* WireGuard Region Tag Cloud */}
+                      <div className="form-group">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                          <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
+                            <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>{piaRegionsList.length} selected</span>
+                          </label>
+                          <button type="button" onClick={fetchPiaRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(59,130,246,0.1)' }}>
+                            <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Refresh
+                          </button>
+                        </div>
+                        <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
+                          <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '180px', overflowY: 'auto', padding: '4px' }}>
+                            {piaRegions.length > 0 ? piaRegions.map(r => {
+                              const isSelected = piaRegionsList.includes(r.id);
+                              return (
+                                <div key={r.id} onClick={() => {
+                                  if (isSelected) setPiaRegionsList(piaRegionsList.filter(x => x !== r.id));
+                                  else setPiaRegionsList([...piaRegionsList, r.id]);
+                                }} style={{
+                                  padding: '5px 11px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
+                                  display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
+                                  background: isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.05)',
+                                  color: isSelected ? '#fff' : 'var(--text-secondary)',
+                                  border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)'}`
+                                }}>
+                                  {r.name}
+                                  {r.portForward && <span style={{ fontSize: '9px', background: 'rgba(0,0,0,0.35)', padding: '1px 4px', borderRadius: '3px' }}>PF</span>}
+                                  {isSelected && <span className="material-icons-round" style={{ fontSize: '12px' }}>check</span>}
+                                </div>
+                              );
+                            }) : (
+                              <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
+                                Click "Refresh" to load regions from PIA...
+                              </div>
+                            )}
+                          </div>
+                          <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
+                            Failover order: <strong style={{ color: 'var(--accent-primary)' }}>{piaRegionsList.join(' ➜ ') || 'None selected'}</strong>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                        <div className="form-group">
+                          <label>Auto-Failover Retries</label>
+                          <input type="number" name="PIA_ROTATION_RETRIES" value={config.PIA_ROTATION_RETRIES || '3'} onChange={handleChange} className="text-input" placeholder="3" />
+                        </div>
+                        <div className="form-group">
+                          <label>Rotation Limit <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-secondary)' }}>(0 = infinite)</span></label>
+                          <input type="number" name="PIA_ROTATION_COUNT" value={config.PIA_ROTATION_COUNT || '0'} onChange={handleChange} className="text-input" placeholder="0" />
+                        </div>
+                      </div>
+
+                      <div className="toggle-switch-container" style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px' }}>
+                        <div className="toggle-info">
+                          <strong style={{ fontSize: '15px' }}>Port Forwarding</strong>
+                          <span>Only use PIA servers that support port forwarding</span>
+                        </div>
+                        <label className="switch">
+                          <input type="checkbox" checked={piaPortForwarding} onChange={e => setPiaPortForwarding(e.target.checked)} />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+
+                      <button
+                        type="button" onClick={handlePiaGenerate}
+                        disabled={piaGenerating || !piaUsername || !piaPassword || piaRegionsList.length === 0}
+                        className="btn btn-primary"
+                        style={{ width: '100%', padding: '14px', fontSize: '15px' }}
+                      >
+                        <span className="material-icons-round">{piaGenerating ? 'hourglass_top' : 'bolt'}</span>
+                        {piaGenerating ? 'Generating Keys & Connecting...' : 'Generate Keys & Connect VPN'}
+                      </button>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center', marginTop: '4px' }}>
+                        Generates a WireGuard config via PIA API, writes it to Gluetun, and restarts.
+                      </p>
+                    </>
+                  )}
+
+                  {/* PIA OpenVPN Panel */}
+                  {config.VPN_TYPE === 'openvpn' && (
+                    <>
+                      <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '4px 0' }} />
+                      <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(16, 185, 129, 0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
+                        <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                          <span className="material-icons-round" style={{ color: 'var(--success)' }}>lock</span>
+                          PIA OpenVPN — uses your PIA credentials directly. Select multiple regions for auto-failover rotation.
+                        </p>
+                      </div>
+
+                      <h3 style={{ fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: 0 }}>
+                        <span className="material-icons-round" style={{ color: 'var(--success)', fontSize: '20px' }}>key</span>
+                        PIA Account Credentials
+                      </h3>
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                        <div className="form-group">
+                          <label>Username</label>
+                          <input type="text" name="OPENVPN_USER" value={config.OPENVPN_USER || ''} onChange={handleChange} className="text-input" placeholder="PIA Username" />
+                        </div>
+                        <div className="form-group">
+                          <label>Password</label>
+                          <input type="password" name="OPENVPN_PASSWORD" value={config.OPENVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="PIA Password" />
+                        </div>
+                      </div>
+
+                      {/* OpenVPN Region Tag Cloud */}
+                      <div className="form-group">
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                          <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
+                            <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
+                              {piaRegionsList.length} selected
+                            </span>
+                          </label>
+                          <button type="button" onClick={fetchPiaOpenVpnRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>
+                            <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch Regions
+                          </button>
+                        </div>
+                        <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
+                          <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '200px', overflowY: 'auto', padding: '4px' }}>
+                            {piaOpenVpnRegions.length > 0 ? piaOpenVpnRegions.map(region => {
+                              const isSelected = piaRegionsList.includes(region);
+                              return (
+                                <div key={region} onClick={() => {
+                                  if (isSelected) setPiaRegionsList(piaRegionsList.filter(x => x !== region));
+                                  else setPiaRegionsList([...piaRegionsList, region]);
+                                }} style={{
+                                  padding: '5px 12px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
+                                  display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
+                                  background: isSelected ? 'var(--success)' : 'rgba(255,255,255,0.05)',
+                                  color: isSelected ? '#fff' : 'var(--text-secondary)',
+                                  border: `1px solid ${isSelected ? 'var(--success)' : 'rgba(255,255,255,0.1)'}`
+                                }}>
+                                  {region}
+                                  {isSelected && <span className="material-icons-round" style={{ fontSize: '12px' }}>check</span>}
+                                </div>
+                              );
+                            }) : (
+                              <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
+                                Click "Fetch Regions" to load available PIA OpenVPN regions...
+                              </div>
+                            )}
+                          </div>
+                          <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
+                            Failover order: <strong style={{ color: 'var(--success)' }}>{piaRegionsList.join(' ➜ ') || 'None selected'}</strong>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                        <div className="form-group">
+                          <label>Auto-Failover Retries</label>
+                          <input type="number" name="PIA_ROTATION_RETRIES" value={config.PIA_ROTATION_RETRIES || '3'} onChange={handleChange} className="text-input" placeholder="3" />
+                        </div>
+                        <div className="form-group">
+                          <label>Rotation Limit <span style={{ fontSize: '11px', fontWeight: 400, color: 'var(--text-secondary)' }}>(0 = infinite)</span></label>
+                          <input type="number" name="PIA_ROTATION_COUNT" value={config.PIA_ROTATION_COUNT || '0'} onChange={handleChange} className="text-input" placeholder="0" />
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+                        <div className="form-group">
+                          <label>Protocol</label>
+                          <select name="OPENVPN_PROTOCOL" value={config.OPENVPN_PROTOCOL || 'udp'} onChange={handleChange} className="select-input">
+                            <option value="udp">UDP</option>
+                            <option value="tcp">TCP</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label>Version</label>
+                          <select name="OPENVPN_VERSION" value={config.OPENVPN_VERSION || '2.6'} onChange={handleChange} className="select-input">
+                            <option value="2.6">2.6</option>
+                            <option value="2.5">2.5</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label>Verbosity</label>
+                          <select name="OPENVPN_VERBOSITY" value={config.OPENVPN_VERBOSITY || '1'} onChange={handleChange} className="select-input">
+                            <option value="0">0 Silent</option>
+                            <option value="1">1 Default</option>
+                            <option value="3">3</option>
+                            <option value="6">6 Max</option>
+                          </select>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button" onClick={handleSave}
+                        disabled={saving || !config.OPENVPN_USER || !config.OPENVPN_PASSWORD || piaRegionsList.length === 0}
+                        className="btn btn-primary"
+                        style={{ width: '100%', padding: '14px', fontSize: '15px', background: 'var(--success)', boxShadow: '0 4px 14px rgba(16,185,129,0.3)' }}
+                      >
+                        <span className="material-icons-round">{saving ? 'hourglass_top' : 'save'}</span>
+                        {saving ? 'Saving & Connecting...' : 'Save & Connect OpenVPN'}
+                      </button>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center', marginTop: '4px' }}>
+                        Saves credentials and selected regions, then restarts Gluetun with OpenVPN.
+                      </p>
+                    </>
+                  )}
+                </>
+              ) : (
+                // ── Non-PIA: Generic cascading server filter + WG + OpenVPN config ──
+                <>
+                  {/* Generic Server Selection (cascading filter) */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                       <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>Server Selection</h3>
                       {fetchingFiltered && (
@@ -395,246 +663,52 @@ export default function Settings() {
 
                   {serverOptions.countries.length === 0 && !fetchingServers && config.VPN_SERVICE_PROVIDER && (
                     <p style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic', marginTop: 0 }}>
-                      Click "Fetch Servers" to load available options. Selecting a Country will automatically filter Regions, Cities, and Hostnames.
+                      Click "Fetch Servers" to load options. Selecting a Country will automatically filter Regions, Cities, and Hostnames.
                     </p>
                   )}
 
-                  {/* Countries — always unfiltered, drives everything below */}
                   <div className="form-group">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      Server Countries
-                      {serverOptions.countries.length > 0 && (
-                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>({serverOptions.countries.length} available)</span>
-                      )}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>Server Countries
+                      {serverOptions.countries.length > 0 && <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>({serverOptions.countries.length} available)</span>}
                     </label>
-                    <input
-                      type="text" name="SERVER_COUNTRIES"
-                      value={config.SERVER_COUNTRIES || ''}
-                      onChange={e => {
-                        handleChange(e);
-                        handleServerFieldChange('SERVER_COUNTRIES', e.target.value);
-                      }}
-                      className="text-input" placeholder="e.g. Switzerland, Romania"
-                    />
+                    <input type="text" name="SERVER_COUNTRIES" value={config.SERVER_COUNTRIES || ''} onChange={e => { handleChange(e); handleServerFieldChange('SERVER_COUNTRIES', e.target.value); }} className="text-input" placeholder="e.g. Switzerland, Romania" />
                     {renderLinkedPills(serverOptions.countries, 'SERVER_COUNTRIES')}
                   </div>
 
-                  {/* Regions — filtered by selected countries */}
                   <div className="form-group">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      Server Regions
-                      {serverOptions.regions.length > 0 && (
-                        <span style={{ fontSize: '11px', color: config.SERVER_COUNTRIES ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                          ({serverOptions.regions.length}{config.SERVER_COUNTRIES ? ' filtered' : ' available'})
-                        </span>
-                      )}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>Server Regions
+                      {serverOptions.regions.length > 0 && <span style={{ fontSize: '11px', color: config.SERVER_COUNTRIES ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>({serverOptions.regions.length}{config.SERVER_COUNTRIES ? ' filtered' : ' available'})</span>}
                     </label>
-                    <input
-                      type="text" name="SERVER_REGIONS"
-                      value={config.SERVER_REGIONS || ''}
-                      onChange={e => {
-                        handleChange(e);
-                        handleServerFieldChange('SERVER_REGIONS', e.target.value);
-                      }}
-                      className="text-input" placeholder="e.g. East US, Western Europe"
-                    />
+                    <input type="text" name="SERVER_REGIONS" value={config.SERVER_REGIONS || ''} onChange={e => { handleChange(e); handleServerFieldChange('SERVER_REGIONS', e.target.value); }} className="text-input" placeholder="e.g. East US, Western Europe" />
                     {renderLinkedPills(serverOptions.regions, 'SERVER_REGIONS')}
                   </div>
 
-                  {/* Cities, Hostnames, Names — filtered by country + region */}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
                     <div className="form-group">
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        Server Cities
-                        {serverOptions.cities.length > 0 && (
-                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                            ({serverOptions.cities.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
-                          </span>
-                        )}
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>Server Cities
+                        {serverOptions.cities.length > 0 && <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>({serverOptions.cities.length}{(config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? ' filtered' : ''})</span>}
                       </label>
                       <input type="text" name="SERVER_CITIES" value={config.SERVER_CITIES || ''} onChange={handleChange} className="text-input" placeholder="e.g. New York, London" />
                       {renderLinkedPills(serverOptions.cities, 'SERVER_CITIES')}
                     </div>
                     <div className="form-group">
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        Server Hostnames
-                        {serverOptions.hostnames.length > 0 && (
-                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                            ({serverOptions.hostnames.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
-                          </span>
-                        )}
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>Server Hostnames
+                        {serverOptions.hostnames.length > 0 && <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>({serverOptions.hostnames.length}{(config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? ' filtered' : ''})</span>}
                       </label>
                       <input type="text" name="SERVER_HOSTNAMES" value={config.SERVER_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="e.g. us-nyc1.server.com" />
                       {renderLinkedPills(serverOptions.hostnames, 'SERVER_HOSTNAMES')}
                     </div>
                     <div className="form-group">
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        Server Names
-                        {serverOptions.server_names.length > 0 && (
-                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
-                            ({serverOptions.server_names.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
-                          </span>
-                        )}
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>Server Names
+                        {serverOptions.server_names.length > 0 && <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>({serverOptions.server_names.length}{(config.SERVER_COUNTRIES||config.SERVER_REGIONS) ? ' filtered' : ''})</span>}
                       </label>
                       <input type="text" name="SERVER_NAMES" value={config.SERVER_NAMES || ''} onChange={handleChange} className="text-input" placeholder="e.g. server-name-1" />
                       {renderLinkedPills(serverOptions.server_names, 'SERVER_NAMES')}
                     </div>
                   </div>
-                </>
-              {/* PIA + WireGuard: Show integrated generator */}
-              {config.VPN_SERVICE_PROVIDER === 'private internet access' && (config.VPN_TYPE || 'wireguard') === 'wireguard' && (
-                <>
-                  <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
 
-                  <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)' }}>
-                    <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                      <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
-                      Enter your PIA credentials below to automatically generate WireGuard keys and connect. Credentials are saved for automatic background refresh when sessions expire.
-                    </p>
-                  </div>
-
-                  {piaStatus && piaStatus.state !== 'idle' && (
-                    <div style={{
-                      padding: '16px', borderRadius: '10px',
-                      background: piaStatus.state === 'success' ? 'rgba(16, 185, 129, 0.1)' : piaStatus.state === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-                      border: `1px solid ${piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)'}`,
-                      display: 'flex', alignItems: 'center', gap: '12px'
-                    }}>
-                      <span className="material-icons-round" style={{ color: piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)' }}>
-                        {piaStatus.state === 'success' ? 'check_circle' : piaStatus.state === 'error' ? 'error' : 'hourglass_top'}
-                      </span>
-                      <div>
-                        <strong style={{ fontSize: '14px' }}>{piaStatus.state === 'success' ? 'Connected' : piaStatus.state === 'error' ? 'Error' : 'Working...'}</strong>
-                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{piaStatus.message}</p>
-                        {piaStatus.lastGenerated && <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>Last generated: {new Date(piaStatus.lastGenerated).toLocaleString()}</p>}
-                      </div>
-                    </div>
-                  )}
-
-                  <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>key</span>
-                    PIA Account Credentials
-                  </h3>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                    <div className="form-group">
-                      <label>PIA Username (p-number)</label>
-                      <input type="text" value={piaUsername} onChange={e => setPiaUsername(e.target.value)} className="text-input" placeholder="p1234567" />
-                    </div>
-                    <div className="form-group">
-                      <label>PIA Password</label>
-                      <input type="password" value={piaPassword} onChange={e => setPiaPassword(e.target.value)} className="text-input" placeholder="Your PIA password" />
-                    </div>
-                  </div>
-
-                  <div className="form-group" style={{ marginBottom: '16px' }}>
-                    <label>PIA Regions (Auto-Failover Sequence)</label>
-                    <div style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                        <span style={{ fontSize: '14px', fontWeight: 600 }}>Selected: {piaRegionsList.length}</span>
-                        <button type="button" onClick={fetchPiaRegions} className="btn" style={{ padding: '6px 12px', fontSize: '13px', background: 'rgba(59, 130, 246, 0.1)' }}>
-                          <span className="material-icons-round" style={{ fontSize: '14px' }}>refresh</span> Refresh List
-                        </button>
-                      </div>
-                      
-                      <div style={{ 
-                        display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '200px', overflowY: 'auto', 
-                        padding: '12px', background: 'rgba(0,0,0,0.3)', borderRadius: '8px', border: '1px inset rgba(255,255,255,0.05)'
-                      }}>
-                        {piaRegions.length > 0 ? piaRegions.map(r => {
-                          const isSelected = piaRegionsList.includes(r.id);
-                          return (
-                            <div 
-                              key={r.id} 
-                              onClick={() => {
-                                if (isSelected) setPiaRegionsList(piaRegionsList.filter(x => x !== r.id));
-                                else setPiaRegionsList([...piaRegionsList, r.id]);
-                              }}
-                              style={{ 
-                                padding: '6px 12px', borderRadius: '16px', fontSize: '13px', cursor: 'pointer',
-                                display: 'flex', alignItems: 'center', gap: '6px', transition: 'all 0.2s',
-                                background: isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.05)',
-                                color: isSelected ? '#fff' : 'var(--text-secondary)',
-                                border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)'}`
-                              }}
-                            >
-                              {r.name}{r.portForward ? <span style={{fontSize:'10px', background:'rgba(0,0,0,0.3)', padding:'2px 4px', borderRadius:'4px', marginLeft: '4px'}}>PF</span> : ''}
-                              {isSelected && <span className="material-icons-round" style={{ fontSize: '14px' }}>check</span>}
-                            </div>
-                          );
-                        }) : (
-                          <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '16px' }}>
-                            Click "Refresh List" to download available regions from PIA...
-                          </div>
-                        )}
-                      </div>
-                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '12px', marginBottom: 0 }}>
-                        Click regions to toggle. They will be attempted in the order they were selected: 
-                        <strong style={{ color: 'var(--accent-primary)', marginLeft: '6px' }}>{piaRegionsList.join(' ➜ ') || 'None selected'}</strong>
-                      </p>
-                    </div>
-                  </div>
-                  
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginBottom: '16px' }}>
-                    <div className="form-group">
-                      <label>Auto-Failover Retries</label>
-                      <input type="number" name="PIA_ROTATION_RETRIES" value={config.PIA_ROTATION_RETRIES || '3'} onChange={handleChange} className="text-input" placeholder="3" />
-                    </div>
-                    <div className="form-group">
-                      <label>Rotation Interval Limit</label>
-                      <input type="number" name="PIA_ROTATION_COUNT" value={config.PIA_ROTATION_COUNT || '0'} onChange={handleChange} className="text-input" title="0 for infinite" placeholder="0 = infinite" />
-                    </div>
-                  </div>
-
-                  <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                    <div className="toggle-info">
-                      <strong style={{ fontSize: '16px' }}>Enable Port Forwarding</strong>
-                      <span style={{ color: 'var(--text-secondary)' }}>Only connect to PIA servers that support port forwarding</span>
-                    </div>
-                    <label className="switch">
-                      <input type="checkbox" checked={piaPortForwarding} onChange={e => setPiaPortForwarding(e.target.checked)} />
-                      <span className="slider"></span>
-                    </label>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={handlePiaGenerate}
-                    disabled={piaGenerating || !piaUsername || !piaPassword || piaRegionsList.length === 0}
-                    className="btn btn-primary"
-                    style={{ width: '100%', padding: '16px', fontSize: '16px', marginTop: '8px' }}
-                  >
-                    <span className="material-icons-round">{piaGenerating ? 'hourglass_top' : 'bolt'}</span>
-                    {piaGenerating ? 'Generating WireGuard Keys & Connecting...' : 'Generate Keys & Connect VPN'}
-                  </button>
-
-                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', textAlign: 'center', marginTop: '4px' }}>
-                    Generates a fresh WireGuard config, saves it, and restarts Gluetun. Credentials are stored for automatic background refresh.
-                  </p>
-                </>
-              )}
-
-              {/* PIA + OpenVPN */}
-              {config.VPN_SERVICE_PROVIDER === 'private internet access' && config.VPN_TYPE === 'openvpn' && (
-                <>
-                  <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
-                  <h3 style={{ fontSize: '18px', fontWeight: 600 }}>OpenVPN Configuration</h3>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                    <div className="form-group">
-                      <label>Username</label>
-                      <input type="text" name="OPENVPN_USER" value={config.OPENVPN_USER || ''} onChange={handleChange} className="text-input" placeholder="PIA Username" />
-                    </div>
-                    <div className="form-group">
-                      <label>Password</label>
-                      <input type="password" name="OPENVPN_PASSWORD" value={config.OPENVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="PIA Password" />
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {/* Non-PIA providers: Generic WireGuard and OpenVPN sections */}
-              {config.VPN_SERVICE_PROVIDER !== 'private internet access' && (
-                <>
+                  {/* Non-PIA: Generic WireGuard + OpenVPN config */}
+                  <>
                   <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
                   <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
@@ -813,9 +887,8 @@ export default function Settings() {
                     </div>
                   </div>
                 </>
-              )}
-
-
+                </> // end non-PIA else branch
+              )} {/* end PIA ternary */}
 
             </>
           )}
