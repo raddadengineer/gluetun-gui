@@ -434,6 +434,15 @@ app.get('/api/config', authenticateToken, (req, res) => {
             }
         }
 
+        // Clean spaces from DNS_UPSTREAM_RESOLVERS so Gluetun parses them strictly
+        if (config.DNS_UPSTREAM_RESOLVERS) {
+            const fixed = config.DNS_UPSTREAM_RESOLVERS.split(',').map(s => s.trim()).filter(Boolean).join(',');
+            if (fixed !== config.DNS_UPSTREAM_RESOLVERS) {
+                config.DNS_UPSTREAM_RESOLVERS = fixed;
+                didMigrate = true;
+            }
+        }
+
         // Persist migrated values back to .env so Gluetun never sees stale/deprecated vars
         if (didMigrate) {
             let newEnv = '';
@@ -503,6 +512,11 @@ app.post('/api/config', authenticateToken, async (req, res) => {
                     return ip;
                 })
                 .join(',');
+        }
+
+        // Clean spaces from DNS_UPSTREAM_RESOLVERS
+        if (gluetunEnv.DNS_UPSTREAM_RESOLVERS) {
+            gluetunEnv.DNS_UPSTREAM_RESOLVERS = gluetunEnv.DNS_UPSTREAM_RESOLVERS.split(',').map(s => s.trim()).filter(Boolean).join(',');
         }
 
         // Clean WIREGUARD_ADDRESSES to ensure it's IPv4 only (e.g., discard IPv6 CIDRs from PIA)
