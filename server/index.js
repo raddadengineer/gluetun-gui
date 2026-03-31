@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
 const { exec } = require('child_process');
+const https = require('https');
 
 const app = express();
 app.use(cors());
@@ -12,8 +13,50 @@ app.use(express.json());
 
 // Hardcoded for local GUI, but perfectly limits unauthorized access
 const JWT_SECRET = 'gluetun-gui-super-secret-key';
-const ENV_PATH = path.join(__dirname, '.env');
-const SESSIONS_PATH = path.join(__dirname, 'sessions.json');
+
+// ─── Data Directory ───────────────────────────────────────────────────────────
+// DATA_DIR env var centralises all persistent state under one folder.
+// Falls back to legacy paths for backward compatibility.
+const DATA_DIR = process.env.DATA_DIR || null;
+if (DATA_DIR && !fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    console.log(`[Init] Created data directory: ${DATA_DIR}`);
+}
+
+const ENV_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'gui-config.env')
+    : path.join(__dirname, '.env');
+const SESSIONS_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'sessions.json')
+    : path.join(__dirname, 'sessions.json');
+const GLUETUN_ENV_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'gluetun.env')
+    : '/gluetun.env';
+const WG_CONFIG_DIR = DATA_DIR
+    ? path.join(DATA_DIR, 'wireguard')
+    : '/config';
+if (DATA_DIR && !fs.existsSync(WG_CONFIG_DIR)) {
+    fs.mkdirSync(WG_CONFIG_DIR, { recursive: true });
+}
+
+// Migrate legacy files into DATA_DIR if they exist
+if (DATA_DIR) {
+    const legacyEnv = path.join(__dirname, '.env');
+    if (fs.existsSync(legacyEnv) && !fs.existsSync(ENV_PATH)) {
+        fs.copyFileSync(legacyEnv, ENV_PATH);
+        console.log('[Init] Migrated legacy .env → gui-config.env');
+    }
+    const legacySessions = path.join(__dirname, 'sessions.json');
+    if (fs.existsSync(legacySessions) && !fs.existsSync(SESSIONS_PATH)) {
+        fs.copyFileSync(legacySessions, SESSIONS_PATH);
+        console.log('[Init] Migrated legacy sessions.json');
+    }
+}
+
+console.log(`[Init] ENV_PATH: ${ENV_PATH}`);
+console.log(`[Init] SESSIONS_PATH: ${SESSIONS_PATH}`);
+console.log(`[Init] GLUETUN_ENV_PATH: ${GLUETUN_ENV_PATH}`);
+console.log(`[Init] WG_CONFIG_DIR: ${WG_CONFIG_DIR}`);
 
 // ─── Session Tracking ─────────────────────────────────────────────────────────
 let sessions = [];
@@ -302,11 +345,9 @@ app.get('/api/logs', authenticateToken, async (req, res) => {
 });
 
 async function recreateGluetunContainer(newEnvObj) {
-    const GLUETUN_ENV_PATH = '/gluetun.env';
-    
-    // Write the flat gluetun.env file
+    // Write the flat gluetun.env backup file
     const envLines = Object.entries(newEnvObj)
-        .filter(([_, v]) => v !== undefined && v !== null && v !== '')
+        .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
         .map(([k, v]) => `${k}=${v}`);
     fs.writeFileSync(GLUETUN_ENV_PATH, envLines.join('\n') + '\n', 'utf8');
 
@@ -361,6 +402,50 @@ app.get('/api/config', authenticateToken, (req, res) => {
                 config[parts[0]] = parts.slice(1).join('=').trim();
             }
         });
+
+        // Migrate deprecated env var names to current Gluetun equivalents before sending to GUI
+        const deprecatedMap = {
+            'VPN_ENDPOINT_IP':    config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_IP'    : 'WIREGUARD_ENDPOINT_IP',
+            'VPN_ENDPOINT_PORT':  config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_PORT'  : 'WIREGUARD_ENDPOINT_PORT',
+            'DOT_PROVIDERS':      'DNS_UPSTREAM_RESOLVERS',
+            'DNS_ADDRESS':        'DNS_UPSTREAM_PLAIN_ADDRESSES',
+            'DOT_CACHING':        'DNS_CACHING',
+        };
+        let didMigrate = false;
+        Object.entries(deprecatedMap).forEach(([oldKey, newKey]) => {
+            if (config[oldKey]) {
+                if (!config[newKey]) config[newKey] = config[oldKey];
+                delete config[oldKey];
+                didMigrate = true;
+            }
+        });
+
+        // Ensure DNS_UPSTREAM_PLAIN_ADDRESSES has port suffix
+        if (config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
+            const fixed = config.DNS_UPSTREAM_PLAIN_ADDRESSES
+                .split(',')
+                .map(ip => ip.trim())
+                .filter(Boolean)
+                .map(ip => ip.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? `${ip}:53` : ip)
+                .join(',');
+            if (fixed !== config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
+                config.DNS_UPSTREAM_PLAIN_ADDRESSES = fixed;
+                didMigrate = true;
+            }
+        }
+
+        // Persist migrated values back to .env so Gluetun never sees stale/deprecated vars
+        if (didMigrate) {
+            let newEnv = '';
+            for (const [k, v] of Object.entries(config)) {
+                if (v !== undefined && v !== null && v.toString().trim() !== '') {
+                    newEnv += `${k}=${v}\n`;
+                }
+            }
+            fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
+            console.log('[Config] Migrated deprecated env vars and persisted to .env');
+        }
+
         res.json(config);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -372,7 +457,7 @@ app.post('/api/config', authenticateToken, async (req, res) => {
         const config = req.body;
         let envContent = '';
         for (const [key, value] of Object.entries(config)) {
-            if (value !== undefined && value !== null && value !== '') {
+            if (value !== undefined && value !== null && value.toString().trim() !== '' && value !== 'undefined') {
                 envContent += `${key}=${value}\n`;
             }
         }
@@ -390,6 +475,53 @@ app.post('/api/config', authenticateToken, async (req, res) => {
            if (gluetunEnv[k] === 'false') gluetunEnv[k] = 'off';
         });
 
+        // Migrate deprecated env var names to current Gluetun equivalents
+        const deprecatedMap = {
+            'VPN_ENDPOINT_IP':    gluetunEnv.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_IP'    : 'WIREGUARD_ENDPOINT_IP',
+            'VPN_ENDPOINT_PORT':  gluetunEnv.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_PORT'  : 'WIREGUARD_ENDPOINT_PORT',
+            'DOT_PROVIDERS':      'DNS_UPSTREAM_RESOLVERS',
+            'DNS_ADDRESS':        'DNS_UPSTREAM_PLAIN_ADDRESSES',
+            'DOT_CACHING':        'DNS_CACHING',
+        };
+        Object.entries(deprecatedMap).forEach(([oldKey, newKey]) => {
+            if (gluetunEnv[oldKey] && !gluetunEnv[newKey]) {
+                gluetunEnv[newKey] = gluetunEnv[oldKey];
+            }
+            delete gluetunEnv[oldKey];
+        });
+
+        // Ensure plain DNS addresses contain a port
+        if (gluetunEnv.DNS_UPSTREAM_PLAIN_ADDRESSES) {
+            gluetunEnv.DNS_UPSTREAM_PLAIN_ADDRESSES = gluetunEnv.DNS_UPSTREAM_PLAIN_ADDRESSES
+                .split(',')
+                .map(ip => ip.trim())
+                .map(ip => {
+                    // Append :53 if it's an IPv4 address without a port
+                    if (ip && ip.match(/^(\d{1,3}\.){3}\d{1,3}$/)) {
+                        return `${ip}:53`;
+                    }
+                    return ip;
+                })
+                .join(',');
+        }
+
+        // Clean WIREGUARD_ADDRESSES to ensure it's IPv4 only (e.g., discard IPv6 CIDRs from PIA)
+        if (gluetunEnv.WIREGUARD_ADDRESSES) {
+            const addrs = gluetunEnv.WIREGUARD_ADDRESSES.split(',').map(a => a.trim());
+            let ipv4 = addrs.find(a => a.includes('.'));
+            if (!ipv4) ipv4 = addrs[0];
+            if (ipv4 && !ipv4.includes('/')) ipv4 += '/32';
+            gluetunEnv.WIREGUARD_ADDRESSES = ipv4;
+        }
+
+        // Strip env vars that are not real Gluetun vars (legacy GUI artifacts)
+        ['FIREWALL', 'FIREWALL_DEBUG', 'DOT'].forEach(k => delete gluetunEnv[k]);
+
+        // NEVER send specific auto-discovery params if the provider is custom
+        if ((gluetunEnv.VPN_SERVICE_PROVIDER || '').toLowerCase() === 'custom') {
+            ['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES', 'SERVER_NAMES'].forEach(k => delete gluetunEnv[k]);
+        }
+
         // Gluetun requires custom provider for explicit WireGuard configs
         if (gluetunEnv.VPN_SERVICE_PROVIDER === 'private internet access' && gluetunEnv.VPN_TYPE === 'wireguard') {
             gluetunEnv.VPN_SERVICE_PROVIDER = 'custom';
@@ -401,6 +533,116 @@ app.post('/api/config', authenticateToken, async (req, res) => {
         res.json({ message: `Settings saved to .env. ${msg}` });
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Shared Servers Caching Logic ───────────────────────────────────────────
+let gluetunServersCache = null;
+let lastServerFetchTime = 0;
+
+async function fetchGluetunServers() {
+    if (gluetunServersCache && Date.now() - lastServerFetchTime < 86400000) {
+        return gluetunServersCache;
+    }
+    return new Promise((resolve, reject) => {
+        https.get('https://raw.githubusercontent.com/qdm12/gluetun/master/internal/storage/servers.json', (res) => {
+            if (res.statusCode !== 200) return reject(new Error('Failed to fetch servers.json'));
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                try {
+                    gluetunServersCache = JSON.parse(data);
+                    lastServerFetchTime = Date.now();
+                    resolve(gluetunServersCache);
+                } catch (e) {
+                    reject(e);
+                }
+            });
+        }).on('error', reject);
+    });
+}
+
+app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
+    try {
+        const { provider, vpnType, country, region } = req.query;
+        if (!provider) return res.status(400).json({ error: 'Missing provider' });
+
+        const result = {
+            countries: new Set(),
+            regions: new Set(),
+            cities: new Set(),
+            hostnames: new Set(),
+            server_names: new Set()
+        };
+
+        // Standardize VPN type if not provided, else filter dynamically
+        const targetVpnType = vpnType === 'wireguard' ? 'wireguard' : 'openvpn';
+
+        // PIA WireGuard relies natively on the API since it's dynamic
+        if (provider === 'private internet access' && targetVpnType === 'wireguard') {
+            const data = await new Promise((resolve, reject) => {
+                https.get('https://serverlist.piaservers.net/vpninfo/servers/v6', (resp) => {
+                    let raw = '';
+                    resp.on('data', chunk => raw += chunk);
+                    resp.on('end', () => resolve(raw));
+                }).on('error', reject);
+            });
+            const jsonStr = data.split('\n')[0];
+            const parsed = JSON.parse(jsonStr);
+            const regions = parsed.regions.filter(r => !r.offline);
+            return res.json({
+                countries: [],
+                regions: regions.map(r => r.name).sort((a, b) => a.localeCompare(b)),
+                cities: [],
+                hostnames: [],
+                server_names: regions.map(r => r.id).sort()
+            });
+        }
+
+        // Fetch Master Gluetun servers.json
+        const serversData = await fetchGluetunServers();
+        const providerData = serversData[provider];
+        if (!providerData || !providerData.servers) {
+            return res.json({
+                countries: [], regions: [], cities: [], hostnames: [], server_names: []
+            });
+        }
+
+        // Support cascading filters: ?country=X restricts regions/cities/hostnames/names
+        // ?region=Y further restricts cities/hostnames/names
+        const filterCountries = country ? country.split(',').map(c => c.trim().toLowerCase()) : null;
+        const filterRegions = region ? region.split(',').map(r => r.trim().toLowerCase()) : null;
+
+        providerData.servers.forEach(s => {
+            if (s.vpn && s.vpn !== targetVpnType) return;
+
+            // Always collect all countries (unfiltered)
+            if (s.country) result.countries.add(s.country);
+
+            // Filter regions by selected countries
+            const countryMatch = !filterCountries || (s.country && filterCountries.includes(s.country.toLowerCase()));
+            if (s.region && countryMatch) result.regions.add(s.region);
+
+            // Filter cities/hostnames/names by selected countries AND regions
+            const regionMatch = !filterRegions || (s.region && filterRegions.includes(s.region.toLowerCase()));
+            if (countryMatch && regionMatch) {
+                if (s.city) result.cities.add(s.city);
+                if (s.hostname) result.hostnames.add(s.hostname);
+                if (s.server_name) result.server_names.add(s.server_name);
+                if (s.name) result.server_names.add(s.name);
+            }
+        });
+
+        res.json({
+            countries: Array.from(result.countries).sort((a, b) => a.localeCompare(b)),
+            regions: Array.from(result.regions).sort((a, b) => a.localeCompare(b)),
+            cities: Array.from(result.cities).sort((a, b) => a.localeCompare(b)),
+            hostnames: Array.from(result.hostnames).sort((a, b) => a.localeCompare(b)),
+            server_names: Array.from(result.server_names).sort((a, b) => a.localeCompare(b))
+        });
+    } catch (err) {
+        console.error('[Helper-Servers] Error:', err.message);
+        res.status(500).json({ error: 'Failed to fetch server data' });
     }
 });
 
@@ -449,7 +691,8 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
     const pfFlag = PIA_PORT_FORWARDING === 'true' ? ' -p' : '';
     const safeRegion = PIA_REGION.replace(/[^a-zA-Z0-9_-]/g, '');
     // pia-wg-config expects: pia-wg-config [flags] <username> <password>
-    const cmd = `/usr/local/bin/pia-wg-config -o /config/wg0.conf -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
+    const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
+    const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
 
     console.log('[PIA-Generate] Running command:', cmd.replace(PIA_PASSWORD, '***'));
 
@@ -469,15 +712,20 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
         // Parse the generated wg0.conf for WireGuard values
         let privateKey = '', address = '', endpoint = '', publicKey = '', serverName = null;
         try {
-            if (fs.existsSync('/config/wg0.conf')) {
-                const wgConf = fs.readFileSync('/config/wg0.conf', 'utf8');
+            if (fs.existsSync(wgConfPath)) {
+                const wgConf = fs.readFileSync(wgConfPath, 'utf8');
                 console.log('[PIA-Generate] Generated wg0.conf:', wgConf);
 
                 const pkMatch = wgConf.match(/PrivateKey\s*=\s*(.+)/);
                 if (pkMatch) privateKey = pkMatch[1].trim();
 
                 const addrMatch = wgConf.match(/Address\s*=\s*(.+)/);
-                if (addrMatch) address = addrMatch[1].trim();
+                if (addrMatch) {
+                    const addrs = addrMatch[1].trim().split(',').map(a => a.trim());
+                    let ipv4 = addrs.find(a => a.includes('.'));
+                    if (!ipv4) ipv4 = addrs[0];
+                    address = ipv4.includes('/') ? ipv4 : ipv4 + '/32';
+                }
 
                 const epMatch = wgConf.match(/Endpoint\s*=\s*(.+)/);
                 if (epMatch) endpoint = epMatch[1].trim();
@@ -505,19 +753,23 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
         }
 
         // Write Gluetun env file with parsed WireGuard values
-        const GLUETUN_ENV_PATH = '/gluetun.env';
-        const gluetunEnv = [
-            'VPN_SERVICE_PROVIDER=custom',
-            'VPN_TYPE=wireguard',
-            `WIREGUARD_PRIVATE_KEY=${privateKey}`,
-            `WIREGUARD_ADDRESSES=${address}`,
-            `VPN_ENDPOINT_IP=${endpointIP}`,
-            `VPN_ENDPOINT_PORT=${endpointPort}`,
-            `WIREGUARD_PUBLIC_KEY=${publicKey}`,
-        ].join('\n') + '\n';
+        const parsedVars = {
+            VPN_SERVICE_PROVIDER: 'custom',
+            VPN_TYPE: 'wireguard',
+            WIREGUARD_PRIVATE_KEY: privateKey,
+            WIREGUARD_ADDRESSES: address,
+            WIREGUARD_ENDPOINT_IP: endpointIP,
+            WIREGUARD_ENDPOINT_PORT: endpointPort,
+            WIREGUARD_PUBLIC_KEY: publicKey,
+        };
+        
+        const gluetunEnv = Object.entries(parsedVars)
+            .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
+            .map(([k, v]) => `${k}=${v}`)
+            .join('\n') + '\n';
 
         fs.writeFileSync(GLUETUN_ENV_PATH, gluetunEnv, 'utf8');
-        console.log('[PIA-Generate] Wrote gluetun.env:', gluetunEnv);
+        console.log('[PIA-Generate] Wrote gluetun env to:', GLUETUN_ENV_PATH);
 
         // Save PIA credentials to GUI .env for persistence
         let envVars = {};
@@ -551,8 +803,8 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
             'VPN_TYPE=wireguard',
             `WIREGUARD_PRIVATE_KEY=${privateKey}`,
             `WIREGUARD_ADDRESSES=${address}`,
-            `VPN_ENDPOINT_IP=${endpointIP}`,
-            `VPN_ENDPOINT_PORT=${endpointPort}`,
+            `WIREGUARD_ENDPOINT_IP=${endpointIP}`,
+            `WIREGUARD_ENDPOINT_PORT=${endpointPort}`,
             `WIREGUARD_PUBLIC_KEY=${publicKey}`,
         ];
 
@@ -574,7 +826,12 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
 
                 // Merge: keep non-VPN/WG env vars from old config, add new VPN ones
                 const keysToReplace = new Set(newEnvArray.map(e => e.split('=')[0]));
-                const filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
+                let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
+                
+                // Aggressively strip generic server params from the old env because Custom provider crashes when generic params are seen
+                const forbiddenKeysForCustom = new Set(['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES', 'SERVER_NAMES']);
+                filteredOldEnv = filteredOldEnv.filter(e => !forbiddenKeysForCustom.has(e.split('=')[0]));
+
                 const mergedEnv = [...filteredOldEnv, ...newEnvArray];
 
                 const createOpts = {
@@ -687,7 +944,8 @@ async function executeFailoverRotation() {
     if (VPN_TYPE === 'wireguard' || !VPN_TYPE) {
         const pfFlag = PIA_PORT_FORWARDING === 'true' ? ' -p' : '';
         const safeRegion = targetRegion.replace(/[^a-zA-Z0-9_-]/g, '');
-        const cmd = `/usr/local/bin/pia-wg-config -o /config/wg0.conf -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
+        const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
+        const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
         
         await new Promise((resolve, reject) => {
             exec(cmd, { timeout: 45000 }, (error, stdout, stderr) => {
@@ -696,19 +954,24 @@ async function executeFailoverRotation() {
             });
         });
 
-        if (fs.existsSync('/config/wg0.conf')) {
-            const wgConf = fs.readFileSync('/config/wg0.conf', 'utf8');
+        if (fs.existsSync(wgConfPath)) {
+            const wgConf = fs.readFileSync(wgConfPath, 'utf8');
             const pkMatch = wgConf.match(/PrivateKey\s*=\s*(.+)/);
             if (pkMatch) gluetunEnv.WIREGUARD_PRIVATE_KEY = pkMatch[1].trim();
 
             const addrMatch = wgConf.match(/Address\s*=\s*(.+)/);
-            if (addrMatch) gluetunEnv.WIREGUARD_ADDRESSES = addrMatch[1].trim();
+            if (addrMatch) {
+                const addrs = addrMatch[1].trim().split(',').map(a => a.trim());
+                let ipv4 = addrs.find(a => a.includes('.'));
+                if (!ipv4) ipv4 = addrs[0];
+                gluetunEnv.WIREGUARD_ADDRESSES = ipv4.includes('/') ? ipv4 : ipv4 + '/32';
+            }
 
             const epMatch = wgConf.match(/Endpoint\s*=\s*(.+)/);
             if (epMatch) {
                 const epParts = epMatch[1].trim().split(':');
-                gluetunEnv.VPN_ENDPOINT_IP = epParts[0];
-                if (epParts[1]) gluetunEnv.VPN_ENDPOINT_PORT = epParts[1];
+                gluetunEnv.WIREGUARD_ENDPOINT_IP = epParts[0];
+                if (epParts[1]) gluetunEnv.WIREGUARD_ENDPOINT_PORT = epParts[1];
             }
 
             const pubMatch = wgConf.match(/PublicKey\s*=\s*(.+)/);

@@ -15,6 +15,11 @@ export default function Settings() {
   const [piaStatus, setPiaStatus] = useState(null);
   const [piaRegions, setPiaRegions] = useState([]);
 
+  // Dynamic server options state
+  const [serverOptions, setServerOptions] = useState({ countries: [], regions: [], cities: [], hostnames: [], server_names: [] });
+  const [fetchingServers, setFetchingServers] = useState(false);
+  const [fetchingFiltered, setFetchingFiltered] = useState(false);
+
   // Load from `.env` via our backend
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -49,6 +54,125 @@ export default function Settings() {
       .catch(console.error);
   };
 
+  const fetchServerOptions = async () => {
+    setFetchingServers(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(
+        `/api/helpers/servers?provider=${encodeURIComponent(config.VPN_SERVICE_PROVIDER || '')}&vpnType=${config.VPN_TYPE || 'wireguard'}`,
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        // Base fetch: all countries always come back unfiltered from backend
+        setServerOptions(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch servers:', e);
+    }
+    setFetchingServers(false);
+  };
+
+  // Re-fetch filtered server options whenever country/region selection changes
+  const fetchFilteredOptions = async (selectedCountries, selectedRegions) => {
+    if (!config.VPN_SERVICE_PROVIDER || serverOptions.countries.length === 0) return;
+    setFetchingFiltered(true);
+    try {
+      const token = localStorage.getItem('token');
+      const params = new URLSearchParams({
+        provider: config.VPN_SERVICE_PROVIDER || '',
+        vpnType: config.VPN_TYPE || 'wireguard',
+      });
+      if (selectedCountries) params.set('country', selectedCountries);
+      if (selectedRegions) params.set('region', selectedRegions);
+      const res = await fetch(`/api/helpers/servers?${params}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        // Merge: always keep full country list from original fetch, update the rest
+        setServerOptions(prev => ({
+          countries: prev.countries,
+          regions: data.regions,
+          cities: data.cities,
+          hostnames: data.hostnames,
+          server_names: data.server_names,
+        }));
+      }
+    } catch (e) {
+      console.error('Failed to fetch filtered servers:', e);
+    }
+    setFetchingFiltered(false);
+  };
+
+  const renderPills = (list, fieldName) => {
+    if (!list || list.length === 0) return null;
+    return (
+      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '100px', overflowY: 'auto', padding: '6px', background: 'rgba(0,0,0,0.1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
+        {list.map(name => {
+          const isSelected = (config[fieldName] || '').split(',').map(s => s.trim()).includes(name);
+          return (
+            <span
+              key={name}
+              onClick={() => {
+                const current = config[fieldName] ? config[fieldName].split(',').map(s => s.trim()).filter(Boolean) : [];
+                if (!current.includes(name)) {
+                  handleChange({ target: { name: fieldName, value: [...current, name].join(', ') } });
+                } else {
+                  handleChange({ target: { name: fieldName, value: current.filter(n => n !== name).join(', ') } });
+                }
+              }}
+              style={{ 
+                fontSize: '11px', padding: '4px 8px', 
+                background: isSelected ? 'var(--accent-primary)' : 'var(--glass-bg)', 
+                border: isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--glass-border)', 
+                borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s',
+                color: isSelected ? '#fff' : 'inherit'
+              }}
+              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
+              onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = 'var(--glass-bg)'; }}
+            >
+              {name}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
+  // Linked pill renderer — uses handlePillClick for cascading filter propagation
+  const renderLinkedPills = (list, fieldName) => {
+    if (!list || list.length === 0) return null;
+    return (
+      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '120px', overflowY: 'auto', padding: '6px', background: 'rgba(0,0,0,0.1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
+        {list.map(name => {
+          const isSelected = (config[fieldName] || '').split(',').map(s => s.trim()).includes(name);
+          return (
+            <span
+              key={name}
+              onClick={() => handlePillClick(fieldName, name)}
+              title={name}
+              style={{
+                fontSize: '11px', padding: '4px 9px',
+                background: isSelected ? 'var(--accent-primary)' : 'var(--glass-bg)',
+                border: isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--glass-border)',
+                borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s',
+                color: isSelected ? '#fff' : 'inherit',
+                maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                display: 'inline-flex', alignItems: 'center', gap: '4px',
+              }}
+              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
+              onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = 'var(--glass-bg)'; }}
+            >
+              {isSelected && <span className="material-icons-round" style={{ fontSize: '10px' }}>check</span>}
+              {name}
+            </span>
+          );
+        })}
+      </div>
+    );
+  };
+
   const handlePiaGenerate = async () => {
     setPiaGenerating(true);
     setMessage(null);
@@ -79,9 +203,50 @@ export default function Settings() {
     setTimeout(() => setMessage(null), 5000);
   };
 
-  const handleChange = (e) => {
+  const handleChange = (e, afterChange) => {
     const value = e.target.type === 'checkbox' ? (e.target.checked ? 'on' : 'off') : e.target.value;
-    setConfig({ ...config, [e.target.name]: value });
+    const newConfig = { ...config, [e.target.name]: value };
+    setConfig(newConfig);
+    if (afterChange) afterChange(newConfig);
+  };
+
+  // Called when server field pill is clicked — updates config and re-filters downstream
+  const handleServerFieldChange = (fieldName, newValue, newConfig) => {
+    const allConfig = newConfig || { ...config, [fieldName]: newValue };
+    const selectedCountries = fieldName === 'SERVER_COUNTRIES' ? newValue : (allConfig.SERVER_COUNTRIES || '');
+    const selectedRegions = fieldName === 'SERVER_REGIONS' ? newValue : (allConfig.SERVER_REGIONS || '');
+    // Only re-fetch if we have server data already loaded
+    if (serverOptions.countries.length > 0) {
+      fetchFilteredOptions(
+        selectedCountries || undefined,
+        selectedRegions || undefined,
+      );
+    }
+  };
+
+  // Pill click handler that also cascades downstream filter re-fetch
+  const handlePillClick = (fieldName, name) => {
+    const current = config[fieldName] ? config[fieldName].split(',').map(s => s.trim()).filter(Boolean) : [];
+    const newList = current.includes(name)
+      ? current.filter(n => n !== name)
+      : [...current, name];
+    const newValue = newList.join(', ');
+    const newConfig = { ...config, [fieldName]: newValue };
+
+    // Clear downstream selections when a parent filter changes
+    if (fieldName === 'SERVER_COUNTRIES') {
+      newConfig.SERVER_REGIONS = '';
+      newConfig.SERVER_CITIES = '';
+      newConfig.SERVER_HOSTNAMES = '';
+      newConfig.SERVER_NAMES = '';
+    } else if (fieldName === 'SERVER_REGIONS') {
+      newConfig.SERVER_CITIES = '';
+      newConfig.SERVER_HOSTNAMES = '';
+      newConfig.SERVER_NAMES = '';
+    }
+
+    setConfig(newConfig);
+    handleServerFieldChange(fieldName, newValue, newConfig);
   };
 
   const handleSave = async (e) => {
@@ -172,12 +337,25 @@ export default function Settings() {
                   <option value="custom">Custom</option>
                   <option value="cyberghost">CyberGhost</option>
                   <option value="expressvpn">ExpressVPN</option>
+                  <option value="fastestvpn">FastestVPN</option>
+                  <option value="giganews">Giganews</option>
+                  <option value="hidemyass">HideMyAss</option>
+                  <option value="ipvanish">IPVanish</option>
                   <option value="ivpn">IVPN</option>
                   <option value="mullvad">Mullvad</option>
                   <option value="nordvpn">NordVPN</option>
+                  <option value="perfect privacy">Perfect Privacy</option>
+                  <option value="privado">Privado</option>
                   <option value="private internet access">Private Internet Access</option>
+                  <option value="privatevpn">PrivateVPN</option>
                   <option value="protonvpn">ProtonVPN</option>
+                  <option value="purevpn">PureVPN</option>
+                  <option value="slickvpn">SlickVPN</option>
                   <option value="surfshark">Surfshark</option>
+                  <option value="torguard">TorGuard</option>
+                  <option value="vpn secure">VPN Secure</option>
+                  <option value="vpn unlimited">VPN Unlimited</option>
+                  <option value="vyprvpn">Vyprvpn</option>
                   <option value="windscribe">Windscribe</option>
                 </select>
               </div>
@@ -190,27 +368,119 @@ export default function Settings() {
                     <option value="openvpn">OpenVPN</option>
                   </select>
                 </div>
-                {config.VPN_SERVICE_PROVIDER !== 'private internet access' && (
-                  <div className="form-group">
-                    <label>Server Countries</label>
-                    <input type="text" name="SERVER_COUNTRIES" value={config.SERVER_COUNTRIES || ''} onChange={handleChange} className="text-input" placeholder="e.g. Switzerland, Romania" />
-                  </div>
-                )}
               </div>
 
-              {config.VPN_SERVICE_PROVIDER !== 'private internet access' && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-                  <div className="form-group">
-                    <label>Server Cities</label>
-                    <input type="text" name="SERVER_CITIES" value={config.SERVER_CITIES || ''} onChange={handleChange} className="text-input" placeholder="e.g. New York, London" />
+              {/* Show Server Configs for all providers universally */}
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>Server Selection</h3>
+                      {fetchingFiltered && (
+                        <span style={{ fontSize: '12px', color: 'var(--accent-primary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <span className="material-icons-round" style={{ fontSize: '14px', animation: 'spin 1s linear infinite' }}>refresh</span>
+                          Filtering...
+                        </span>
+                      )}
+                      {(config.SERVER_COUNTRIES || config.SERVER_REGIONS) && serverOptions.countries.length > 0 && (
+                        <span style={{ fontSize: '11px', padding: '2px 8px', background: 'rgba(59,130,246,0.15)', border: '1px solid var(--accent-primary)', borderRadius: '10px', color: 'var(--accent-primary)' }}>
+                          Cascading filter active
+                        </span>
+                      )}
+                    </div>
+                    <button type="button" onClick={fetchServerOptions} className="btn" style={{ padding: '6px 12px', fontSize: '13px', background: 'rgba(59, 130, 246, 0.1)' }} disabled={fetchingServers || !config.VPN_SERVICE_PROVIDER}>
+                      <span className="material-icons-round" style={{ fontSize: '14px' }}>refresh</span>
+                      {fetchingServers ? 'Fetching...' : 'Fetch Servers'}
+                    </button>
                   </div>
-                  <div className="form-group">
-                    <label>Server Hostnames</label>
-                    <input type="text" name="SERVER_HOSTNAMES" value={config.SERVER_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="e.g. us-nyc1.server.com" />
-                  </div>
-                </div>
-              )}
 
+                  {serverOptions.countries.length === 0 && !fetchingServers && config.VPN_SERVICE_PROVIDER && (
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', fontStyle: 'italic', marginTop: 0 }}>
+                      Click "Fetch Servers" to load available options. Selecting a Country will automatically filter Regions, Cities, and Hostnames.
+                    </p>
+                  )}
+
+                  {/* Countries — always unfiltered, drives everything below */}
+                  <div className="form-group">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      Server Countries
+                      {serverOptions.countries.length > 0 && (
+                        <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>({serverOptions.countries.length} available)</span>
+                      )}
+                    </label>
+                    <input
+                      type="text" name="SERVER_COUNTRIES"
+                      value={config.SERVER_COUNTRIES || ''}
+                      onChange={e => {
+                        handleChange(e);
+                        handleServerFieldChange('SERVER_COUNTRIES', e.target.value);
+                      }}
+                      className="text-input" placeholder="e.g. Switzerland, Romania"
+                    />
+                    {renderLinkedPills(serverOptions.countries, 'SERVER_COUNTRIES')}
+                  </div>
+
+                  {/* Regions — filtered by selected countries */}
+                  <div className="form-group">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      Server Regions
+                      {serverOptions.regions.length > 0 && (
+                        <span style={{ fontSize: '11px', color: config.SERVER_COUNTRIES ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                          ({serverOptions.regions.length}{config.SERVER_COUNTRIES ? ' filtered' : ' available'})
+                        </span>
+                      )}
+                    </label>
+                    <input
+                      type="text" name="SERVER_REGIONS"
+                      value={config.SERVER_REGIONS || ''}
+                      onChange={e => {
+                        handleChange(e);
+                        handleServerFieldChange('SERVER_REGIONS', e.target.value);
+                      }}
+                      className="text-input" placeholder="e.g. East US, Western Europe"
+                    />
+                    {renderLinkedPills(serverOptions.regions, 'SERVER_REGIONS')}
+                  </div>
+
+                  {/* Cities, Hostnames, Names — filtered by country + region */}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Server Cities
+                        {serverOptions.cities.length > 0 && (
+                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                            ({serverOptions.cities.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
+                          </span>
+                        )}
+                      </label>
+                      <input type="text" name="SERVER_CITIES" value={config.SERVER_CITIES || ''} onChange={handleChange} className="text-input" placeholder="e.g. New York, London" />
+                      {renderLinkedPills(serverOptions.cities, 'SERVER_CITIES')}
+                    </div>
+                    <div className="form-group">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Server Hostnames
+                        {serverOptions.hostnames.length > 0 && (
+                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                            ({serverOptions.hostnames.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
+                          </span>
+                        )}
+                      </label>
+                      <input type="text" name="SERVER_HOSTNAMES" value={config.SERVER_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="e.g. us-nyc1.server.com" />
+                      {renderLinkedPills(serverOptions.hostnames, 'SERVER_HOSTNAMES')}
+                    </div>
+                    <div className="form-group">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        Server Names
+                        {serverOptions.server_names.length > 0 && (
+                          <span style={{ fontSize: '11px', color: (config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? 'var(--accent-primary)' : 'var(--text-secondary)' }}>
+                            ({serverOptions.server_names.length}{(config.SERVER_COUNTRIES || config.SERVER_REGIONS) ? ' filtered' : ''})
+                          </span>
+                        )}
+                      </label>
+                      <input type="text" name="SERVER_NAMES" value={config.SERVER_NAMES || ''} onChange={handleChange} className="text-input" placeholder="e.g. server-name-1" />
+                      {renderLinkedPills(serverOptions.server_names, 'SERVER_NAMES')}
+                    </div>
+                  </div>
+                </>
               {/* PIA + WireGuard: Show integrated generator */}
               {config.VPN_SERVICE_PROVIDER === 'private internet access' && (config.VPN_TYPE || 'wireguard') === 'wireguard' && (
                 <>
@@ -366,7 +636,10 @@ export default function Settings() {
               {config.VPN_SERVICE_PROVIDER !== 'private internet access' && (
                 <>
                   <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
-                  <h3 style={{ fontSize: '18px', fontWeight: 600 }}>WireGuard Configuration</h3>
+                  <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
+                    WireGuard Configuration
+                  </h3>
 
                   <div className="form-group">
                     <label>Private Key</label>
@@ -375,17 +648,61 @@ export default function Settings() {
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                     <div className="form-group">
-                      <label>Client Addresses (Comma separated)</label>
-                      <input type="text" name="WIREGUARD_ADDRESSES" value={config.WIREGUARD_ADDRESSES || ''} onChange={handleChange} className="text-input" placeholder="10.64.22.1/32" />
+                      <label>Public Key (Server)</label>
+                      <input type="text" name="WIREGUARD_PUBLIC_KEY" value={config.WIREGUARD_PUBLIC_KEY || ''} onChange={handleChange} className="text-input" placeholder="Server's base64 public key" />
                     </div>
                     <div className="form-group">
-                      <label>Custom MTU</label>
+                      <label>Preshared Key</label>
+                      <input type="password" name="WIREGUARD_PRESHARED_KEY" value={config.WIREGUARD_PRESHARED_KEY || ''} onChange={handleChange} className="text-input" placeholder="Optional preshared key" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Client Addresses</label>
+                      <input type="text" name="WIREGUARD_ADDRESSES" value={config.WIREGUARD_ADDRESSES || ''} onChange={handleChange} className="text-input" placeholder="IPv4 CIDR (e.g. 10.64.22.1/32)" />
+                    </div>
+                    <div className="form-group">
+                      <label>Allowed IPs</label>
+                      <input type="text" name="WIREGUARD_ALLOWED_IPS" value={config.WIREGUARD_ALLOWED_IPS || ''} onChange={handleChange} className="text-input" placeholder="0.0.0.0/0,::/0" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Endpoint IP</label>
+                      <input type="text" name="WIREGUARD_ENDPOINT_IP" value={config.WIREGUARD_ENDPOINT_IP || ''} onChange={handleChange} className="text-input" placeholder="VPN server IP address" />
+                    </div>
+                    <div className="form-group">
+                      <label>Endpoint Port</label>
+                      <input type="text" name="WIREGUARD_ENDPOINT_PORT" value={config.WIREGUARD_ENDPOINT_PORT || ''} onChange={handleChange} className="text-input" placeholder="51820" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Implementation</label>
+                      <select name="WIREGUARD_IMPLEMENTATION" value={config.WIREGUARD_IMPLEMENTATION || 'auto'} onChange={handleChange} className="select-input">
+                        <option value="auto">Auto</option>
+                        <option value="kernelspace">Kernelspace</option>
+                        <option value="userspace">Userspace</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>MTU</label>
                       <input type="number" name="WIREGUARD_MTU" value={config.WIREGUARD_MTU || ''} onChange={handleChange} className="text-input" placeholder="1420" />
+                    </div>
+                    <div className="form-group">
+                      <label>Keepalive Interval</label>
+                      <input type="text" name="WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL" value={config.WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL || ''} onChange={handleChange} className="text-input" placeholder="e.g. 25s" />
                     </div>
                   </div>
 
                   <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
-                  <h3 style={{ fontSize: '18px', fontWeight: 600 }}>OpenVPN Configuration</h3>
+                  <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>lock</span>
+                    OpenVPN Configuration
+                  </h3>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                     <div className="form-group">
@@ -395,6 +712,104 @@ export default function Settings() {
                     <div className="form-group">
                       <label>Password</label>
                       <input type="password" name="OPENVPN_PASSWORD" value={config.OPENVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="Provider Password" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Protocol</label>
+                      <select name="OPENVPN_PROTOCOL" value={config.OPENVPN_PROTOCOL || 'udp'} onChange={handleChange} className="select-input">
+                        <option value="udp">UDP</option>
+                        <option value="tcp">TCP</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Version</label>
+                      <select name="OPENVPN_VERSION" value={config.OPENVPN_VERSION || '2.6'} onChange={handleChange} className="select-input">
+                        <option value="2.6">2.6</option>
+                        <option value="2.5">2.5</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Endpoint IP</label>
+                      <input type="text" name="OPENVPN_ENDPOINT_IP" value={config.OPENVPN_ENDPOINT_IP || ''} onChange={handleChange} className="text-input" placeholder="Server IP" />
+                    </div>
+                    <div className="form-group">
+                      <label>Endpoint Port</label>
+                      <input type="text" name="OPENVPN_ENDPOINT_PORT" value={config.OPENVPN_ENDPOINT_PORT || ''} onChange={handleChange} className="text-input" placeholder="1194" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Cipher</label>
+                      <input type="text" name="OPENVPN_CIPHERS" value={config.OPENVPN_CIPHERS || ''} onChange={handleChange} className="text-input" placeholder="aes-256-gcm" />
+                    </div>
+                    <div className="form-group">
+                      <label>Auth Algorithm</label>
+                      <input type="text" name="OPENVPN_AUTH" value={config.OPENVPN_AUTH || ''} onChange={handleChange} className="text-input" placeholder="sha256" />
+                    </div>
+                    <div className="form-group">
+                      <label>MSS Fix</label>
+                      <input type="number" name="OPENVPN_MSSFIX" value={config.OPENVPN_MSSFIX || ''} onChange={handleChange} className="text-input" placeholder="0 (default)" />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Verbosity</label>
+                      <select name="OPENVPN_VERBOSITY" value={config.OPENVPN_VERBOSITY || '1'} onChange={handleChange} className="select-input">
+                        <option value="0">0 (Silent)</option>
+                        <option value="1">1 (Default)</option>
+                        <option value="2">2</option>
+                        <option value="3">3</option>
+                        <option value="4">4</option>
+                        <option value="5">5</option>
+                        <option value="6">6 (Max)</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Run as Root</label>
+                      <select name="OPENVPN_ROOT" value={config.OPENVPN_ROOT || 'no'} onChange={handleChange} className="select-input">
+                        <option value="no">No</option>
+                        <option value="yes">Yes</option>
+                      </select>
+                    </div>
+                    <div className="form-group">
+                      <label>Process User</label>
+                      <input type="text" name="OPENVPN_PROCESS_USER" value={config.OPENVPN_PROCESS_USER || ''} onChange={handleChange} className="text-input" placeholder="root" />
+                    </div>
+                  </div>
+
+                  <div className="form-group">
+                    <label>Extra OpenVPN Flags</label>
+                    <input type="text" name="OPENVPN_FLAGS" value={config.OPENVPN_FLAGS || ''} onChange={handleChange} className="text-input" placeholder="Space-delimited flags passed to openvpn" />
+                  </div>
+
+                  <div className="form-group">
+                    <label>Custom Config File Path</label>
+                    <input type="text" name="OPENVPN_CUSTOM_CONFIG" value={config.OPENVPN_CUSTOM_CONFIG || ''} onChange={handleChange} className="text-input" placeholder="Path to custom .ovpn file (custom provider only)" />
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Certificate (base64 PEM)</label>
+                      <textarea name="OPENVPN_CERT" value={config.OPENVPN_CERT || ''} onChange={handleChange} className="text-input" placeholder="Base64 part of certificate PEM" rows={3} style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }} />
+                    </div>
+                    <div className="form-group">
+                      <label>Key (base64 PEM)</label>
+                      <textarea name="OPENVPN_KEY" value={config.OPENVPN_KEY || ''} onChange={handleChange} className="text-input" placeholder="Base64 part of key PEM" rows={3} style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }} />
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                    <div className="form-group">
+                      <label>Encrypted Key (base64 PEM)</label>
+                      <textarea name="OPENVPN_ENCRYPTED_KEY" value={config.OPENVPN_ENCRYPTED_KEY || ''} onChange={handleChange} className="text-input" placeholder="Base64 part of encrypted key PEM" rows={3} style={{ fontFamily: 'monospace', fontSize: '12px', resize: 'vertical' }} />
+                    </div>
+                    <div className="form-group">
+                      <label>Key Passphrase</label>
+                      <input type="password" name="OPENVPN_KEY_PASSPHRASE" value={config.OPENVPN_KEY_PASSPHRASE || ''} onChange={handleChange} className="text-input" placeholder="Decrypt encrypted key" />
                     </div>
                   </div>
                 </>
@@ -409,40 +824,63 @@ export default function Settings() {
             <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>dns</span>
-                DNS over TLS (DoT)
+                DNS Configuration
               </h3>
 
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Upstream Resolver Type</label>
+                  <select name="DNS_UPSTREAM_RESOLVER_TYPE" value={config.DNS_UPSTREAM_RESOLVER_TYPE || 'dot'} onChange={handleChange} className="select-input">
+                    <option value="dot">DNS over TLS (DoT)</option>
+                    <option value="doh">DNS over HTTPS (DoH)</option>
+                    <option value="plain">Plain UDP</option>
+                  </select>
+                </div>
+                <div className="form-group">
+                  <label>Upstream Resolvers (comma separated)</label>
+                  <input type="text" name="DNS_UPSTREAM_RESOLVERS" value={config.DNS_UPSTREAM_RESOLVERS || 'cloudflare'} onChange={handleChange} className="text-input" placeholder="cloudflare, quad9" />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    cloudflare, quad9, google, mullvad, libredns, opendns, quadrant
+                  </p>
+                </div>
+              </div>
+
               <div className="form-group">
-                <label>DoT Providers (comma separated)</label>
-                <input type="text" name="DOT_PROVIDERS" value={config.DOT_PROVIDERS || 'cloudflare'} onChange={handleChange} className="text-input" placeholder="cloudflare, quad9" />
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
-                  Available: cloudflare, quad9, google, mullvad, nextdns...
+                <label>Plain DNS Upstream Addresses</label>
+                <input type="text" name="DNS_UPSTREAM_PLAIN_ADDRESSES" value={config.DNS_UPSTREAM_PLAIN_ADDRESSES || ''} onChange={handleChange} className="text-input" placeholder="e.g. 1.1.1.1:53 (not recommended)" />
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  ⚠️ Using a VPN provider DNS exposes all queries. Prefer encrypted upstream resolvers above.
                 </p>
               </div>
 
-              <div className="form-group">
-                <label>Custom Built-in DNS Servers</label>
-                <input type="text" name="DNS_ADDRESS" value={config.DNS_ADDRESS || ''} onChange={handleChange} className="text-input" placeholder="127.0.0.1" />
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px', marginTop: '16px' }}>
                 <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   <div className="toggle-info">
-                    <strong style={{ fontSize: '15px' }}>Enable DoT</strong>
-                    <span>Use DNS over TLS for DNS lookups</span>
+                    <strong style={{ fontSize: '15px' }}>DNS Caching</strong>
+                    <span>Cache DNS queries internally</span>
                   </div>
                   <label className="switch">
-                    <input type="checkbox" name="DOT" checked={config.DOT !== 'off'} onChange={handleChange} />
+                    <input type="checkbox" name="DNS_CACHING" checked={config.DNS_CACHING !== 'off'} onChange={handleChange} />
                     <span className="slider"></span>
                   </label>
                 </div>
                 <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                   <div className="toggle-info">
-                    <strong style={{ fontSize: '15px' }}>DoT Caching</strong>
-                    <span>Cache DNS queries internally</span>
+                    <strong style={{ fontSize: '15px' }}>IPv6 DNS</strong>
+                    <span>Enable DNS IPv6 resolution</span>
                   </div>
                   <label className="switch">
-                    <input type="checkbox" name="DOT_CACHING" checked={config.DOT_CACHING !== 'off'} onChange={handleChange} />
+                    <input type="checkbox" name="DNS_UPSTREAM_IPV6" checked={config.DNS_UPSTREAM_IPV6 === 'on'} onChange={handleChange} />
+                    <span className="slider"></span>
+                  </label>
+                </div>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  <div className="toggle-info">
+                    <strong style={{ fontSize: '15px' }}>Public IP Check</strong>
+                    <span>Log public IP on connect</span>
+                  </div>
+                  <label className="switch">
+                    <input type="checkbox" name="PUBLICIP_ENABLED" checked={config.PUBLICIP_ENABLED !== 'false'} onChange={handleChange} />
                     <span className="slider"></span>
                   </label>
                 </div>
@@ -451,18 +889,29 @@ export default function Settings() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '16px' }}>
                 <div className="form-group">
                   <label>DNS Update Period</label>
-                  <input type="text" name="DNS_UPDATE_PERIOD" value={config.DNS_UPDATE_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="e.g. 24h" />
+                  <input type="text" name="DNS_UPDATE_PERIOD" value={config.DNS_UPDATE_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="24h (0 to disable)" />
                 </div>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                  <div className="toggle-info">
-                    <strong style={{ fontSize: '15px' }}>Public IP Enabled</strong>
-                    <span>Periodically check your public IP</span>
-                  </div>
-                  <label className="switch">
-                    <input type="checkbox" name="PUBLICIP_ENABLED" checked={config.PUBLICIP_ENABLED !== 'off'} onChange={handleChange} />
-                    <span className="slider"></span>
-                  </label>
+                <div className="form-group">
+                  <label>Unblock Hostnames</label>
+                  <input type="text" name="DNS_UNBLOCK_HOSTNAMES" value={config.DNS_UNBLOCK_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="domain1.com, x.domain2.co.uk" />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Exempt from blocklist filtering</p>
                 </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Block IPs</label>
+                  <input type="text" name="DNS_BLOCK_IPS" value={config.DNS_BLOCK_IPS || ''} onChange={handleChange} className="text-input" placeholder="Comma-separated IPs to block" />
+                </div>
+                <div className="form-group">
+                  <label>Block IP Prefixes (CIDRs)</label>
+                  <input type="text" name="DNS_BLOCK_IP_PREFIXES" value={config.DNS_BLOCK_IP_PREFIXES || ''} onChange={handleChange} className="text-input" placeholder="e.g. 10.0.0.0/8" />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Rebinding Protection Exempt Hostnames</label>
+                <input type="text" name="DNS_REBINDING_PROTECTION_EXEMPT_HOSTNAMES" value={config.DNS_REBINDING_PROTECTION_EXEMPT_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="Comma-separated public domain names" />
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
@@ -473,8 +922,8 @@ export default function Settings() {
 
               <div className="toggle-switch-container">
                 <div className="toggle-info">
-                  <strong style={{ fontSize: '15px' }}>Enable Malicious Blocking</strong>
-                  <span>Block malicious hostnames automatically</span>
+                  <strong style={{ fontSize: '15px' }}>Block Malicious</strong>
+                  <span>Block malicious hostnames and IPs</span>
                 </div>
                 <label className="switch">
                   <input type="checkbox" name="BLOCK_MALICIOUS" checked={config.BLOCK_MALICIOUS !== 'off'} onChange={handleChange} />
@@ -510,65 +959,59 @@ export default function Settings() {
             <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginTop: 0 }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>security</span>
-                Firewall & Kill Switch
+                Firewall
               </h3>
 
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
-                <div className="toggle-info">
-                  <strong style={{ fontSize: '16px' }}>Enable VPN Kill Switch</strong>
-                  <span style={{ color: 'var(--text-secondary)' }}>Blocks all traffic if the VPN connection drops (Recommended)</span>
-                </div>
-                <label className="switch">
-                  <input type="checkbox" name="FIREWALL" checked={config.FIREWALL !== 'off'} onChange={handleChange} />
-                  <span className="slider"></span>
-                </label>
-              </div>
-
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginTop: '16px' }}>
-                <div className="toggle-info">
-                  <strong style={{ fontSize: '16px' }}>Firewall Debugging</strong>
-                  <span style={{ color: 'var(--text-secondary)' }}>Log detailed firewall operations to console</span>
-                </div>
-                <label className="switch">
-                  <input type="checkbox" name="FIREWALL_DEBUG" checked={config.FIREWALL_DEBUG === 'on'} onChange={handleChange} />
-                  <span className="slider"></span>
-                </label>
-              </div>
-
               <div className="form-group">
-                <label>Allow Local Network Access (Outbound Subnets)</label>
+                <label>Outbound Subnets (Local Network Access)</label>
                 <input type="text" name="FIREWALL_OUTBOUND_SUBNETS" value={config.FIREWALL_OUTBOUND_SUBNETS || ''} onChange={handleChange} className="text-input" placeholder="e.g. 192.168.1.0/24, 10.0.0.0/8" />
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
-                  Required to access web GUIs and local services while the kill switch is active.
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                  Required to access local services while the VPN is active. Do NOT overlap with VPN tunnel address range.
                 </p>
               </div>
 
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>VPN Input Ports</label>
+                  <input type="text" name="FIREWALL_VPN_INPUT_PORTS" value={config.FIREWALL_VPN_INPUT_PORTS || ''} onChange={handleChange} className="text-input" placeholder="e.g. 1000,8080" />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Ports to allow from the VPN server side</p>
+                </div>
+                <div className="form-group">
+                  <label>Input Ports (Default Interface)</label>
+                  <input type="text" name="FIREWALL_INPUT_PORTS" value={config.FIREWALL_INPUT_PORTS || ''} onChange={handleChange} className="text-input" placeholder="e.g. 1000,8000" />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Needed for Kubernetes sidecars</p>
+                </div>
+              </div>
+
               <div className="form-group">
-                <label>Allow VPN Input Ports (Advanced)</label>
-                <input type="text" name="FIREWALL_VPN_INPUT_PORTS" value={config.FIREWALL_VPN_INPUT_PORTS || ''} onChange={handleChange} className="text-input" placeholder="e.g. 80, 443" />
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
-                  Open specific ports on the VPN side for incoming connections.
-                </p>
+                <label>IPTables Log Level</label>
+                <select name="FIREWALL_IPTABLES_LOG_LEVEL" value={config.FIREWALL_IPTABLES_LOG_LEVEL || ''} onChange={handleChange} className="select-input">
+                  <option value="">Default</option>
+                  <option value="debug">Debug</option>
+                  <option value="info">Info</option>
+                  <option value="warn">Warn</option>
+                  <option value="error">Error</option>
+                </select>
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>hub</span>
-                Port Forwarding
+                VPN Port Forwarding
               </h3>
 
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
-                  Port forwarding is dynamically mapped inside the Gluetun container. Supported via PIA, ProtonVPN, Perfect Privacy.
+                  Supported providers: Private Internet Access, ProtonVPN, Perfect Privacy, PrivateVPN.
                 </p>
               </div>
 
               <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
                 <div className="toggle-info">
-                  <strong style={{ fontSize: '16px' }}>Enable Global Port Forwarding</strong>
-                  <span style={{ color: 'var(--text-secondary)' }}>Automatically request and maintain an open port on the VPN server</span>
+                  <strong style={{ fontSize: '16px' }}>Enable Port Forwarding</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Request and maintain an open port on the VPN server</span>
                 </div>
                 <label className="switch">
                   <input type="checkbox" name="VPN_PORT_FORWARDING" checked={config.VPN_PORT_FORWARDING === 'on'} onChange={handleChange} />
@@ -581,20 +1024,34 @@ export default function Settings() {
                   <label>Port Forwarding Provider Override</label>
                   <select name="VPN_PORT_FORWARDING_PROVIDER" value={config.VPN_PORT_FORWARDING_PROVIDER || ''} onChange={handleChange} className="select-input">
                     <option value="">Default (same as VPN provider)</option>
-                    <option value="pia">Private Internet Access</option>
+                    <option value="private internet access">Private Internet Access</option>
                     <option value="protonvpn">ProtonVPN</option>
                     <option value="perfect privacy">Perfect Privacy</option>
+                    <option value="privatevpn">PrivateVPN</option>
                   </select>
+                </div>
+                <div className="form-group">
+                  <label>Listening Port (Redirect)</label>
+                  <input type="text" name="VPN_PORT_FORWARDING_LISTENING_PORT" value={config.VPN_PORT_FORWARDING_LISTENING_PORT || ''} onChange={handleChange} className="text-input" placeholder="Port to redirect incoming traffic to" />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>Do not use with torrent clients</p>
                 </div>
               </div>
 
-              <div className="form-group">
-                <label>Currently Assigned Port</label>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '16px', background: 'rgba(0,0,0,0.3)', borderRadius: '10px', border: '1px dashed var(--glass-border)' }}>
-                  <span className="material-icons-round" style={{ color: 'var(--success)' }}>vpn_lock</span>
-                  <span style={{ fontSize: '24px', fontWeight: '700', fontFamily: 'monospace', color: 'var(--success)' }}>
-                    {config.VPN_PORT_FORWARDING === 'on' ? 'Waiting for lease...' : 'Disabled'}
-                  </span>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Status File Path</label>
+                  <input type="text" name="VPN_PORT_FORWARDING_STATUS_FILE" value={config.VPN_PORT_FORWARDING_STATUS_FILE || ''} onChange={handleChange} className="text-input" placeholder="/tmp/gluetun/forwarded_port" />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Up Command</label>
+                  <input type="text" name="VPN_PORT_FORWARDING_UP_COMMAND" value={config.VPN_PORT_FORWARDING_UP_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="Shell command on PF setup" />
+                </div>
+                <div className="form-group">
+                  <label>Down Command</label>
+                  <input type="text" name="VPN_PORT_FORWARDING_DOWN_COMMAND" value={config.VPN_PORT_FORWARDING_DOWN_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="Shell command on PF teardown" />
                 </div>
               </div>
             </>
@@ -637,7 +1094,11 @@ export default function Settings() {
                 </div>
                 <div className="form-group">
                   <label>Cipher</label>
-                  <input type="text" name="SHADOWSOCKS_CIPHER" value={config.SHADOWSOCKS_CIPHER || ''} onChange={handleChange} className="text-input" placeholder="e.g. chacha20-ietf-poly1305" />
+                  <select name="SHADOWSOCKS_CIPHER" value={config.SHADOWSOCKS_CIPHER || 'chacha20-ietf-poly1305'} onChange={handleChange} className="select-input">
+                    <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+                    <option value="aes-128-gcm">aes-128-gcm</option>
+                    <option value="aes-256-gcm">aes-256-gcm</option>
+                  </select>
                 </div>
               </div>
 
@@ -672,24 +1133,41 @@ export default function Settings() {
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div className="form-group">
-                  <label>HTTP Proxy Username (Optional)</label>
+                  <label>Username (Optional)</label>
                   <input type="text" name="HTTPPROXY_USER" value={config.HTTPPROXY_USER || ''} onChange={handleChange} className="text-input" placeholder="Proxy Username" />
                 </div>
                 <div className="form-group">
-                  <label>HTTP Proxy Password (Optional)</label>
+                  <label>Password (Optional)</label>
                   <input type="password" name="HTTPPROXY_PASSWORD" value={config.HTTPPROXY_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="Proxy Password" />
                 </div>
               </div>
 
-              <div className="toggle-switch-container" style={{ marginTop: '16px' }}>
-                <div className="toggle-info">
-                  <strong style={{ fontSize: '15px' }}>HTTP Proxy Tracing Log</strong>
-                  <span>Enable detailed traffic logging for HTTP proxy</span>
+              <div className="form-group">
+                <label>Listening Address</label>
+                <input type="text" name="HTTPPROXY_LISTENING_ADDRESS" value={config.HTTPPROXY_LISTENING_ADDRESS || ''} onChange={handleChange} className="text-input" placeholder=":8888" />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '16px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  <div className="toggle-info">
+                    <strong style={{ fontSize: '15px' }}>Stealth Mode</strong>
+                    <span>Strip proxy headers from requests</span>
+                  </div>
+                  <label className="switch">
+                    <input type="checkbox" name="HTTPPROXY_STEALTH" checked={config.HTTPPROXY_STEALTH === 'on'} onChange={handleChange} />
+                    <span className="slider"></span>
+                  </label>
                 </div>
-                <label className="switch">
-                  <input type="checkbox" name="HTTPPROXY_LOG" checked={config.HTTPPROXY_LOG === 'on'} onChange={handleChange} />
-                  <span className="slider"></span>
-                </label>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                  <div className="toggle-info">
+                    <strong style={{ fontSize: '15px' }}>Tracing Log</strong>
+                    <span>Log every tunnel request</span>
+                  </div>
+                  <label className="switch">
+                    <input type="checkbox" name="HTTPPROXY_LOG" checked={config.HTTPPROXY_LOG === 'on'} onChange={handleChange} />
+                    <span className="slider"></span>
+                  </label>
+                </div>
               </div>
             </>
           )}
@@ -699,7 +1177,7 @@ export default function Settings() {
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '16px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>warning</span>
-                  These advanced settings strictly control the internal Gluetun engine behavior.
+                  These advanced settings control the internal Gluetun engine behavior. Only modify if you know what you're doing.
                 </p>
               </div>
 
@@ -710,32 +1188,62 @@ export default function Settings() {
               
               <div className="form-group">
                 <label>Gluetun Log Level</label>
-                <select name="LOG_LEVEL" value={config.LOG_LEVEL || 'debug'} onChange={handleChange} className="select-input">
-                  <option value="info">Info</option>
+                <select name="LOG_LEVEL" value={config.LOG_LEVEL || 'info'} onChange={handleChange} className="select-input">
                   <option value="debug">Debug (Verbose)</option>
+                  <option value="info">Info</option>
                   <option value="warn">Warn</option>
                   <option value="error">Error</option>
-                  <option value="fatal">Fatal</option>
                 </select>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px' }}>
-                  Sets the internal verbosity for the Gluetun VPN container processes.
-                </p>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>monitor_heart</span>
+                Health Check
+              </h3>
+
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginBottom: '16px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '16px' }}>Auto-Restart VPN on Failure</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Automatically restart VPN if health check fails (recommended)</span>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" name="HEALTH_RESTART_VPN" checked={config.HEALTH_RESTART_VPN !== 'off'} onChange={handleChange} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>TCP+TLS Health Targets</label>
+                  <input type="text" name="HEALTH_TARGET_ADDRESSES" value={config.HEALTH_TARGET_ADDRESSES || ''} onChange={handleChange} className="text-input" placeholder="cloudflare.com:443,github.com:443" />
+                </div>
+                <div className="form-group">
+                  <label>ICMP Ping Targets</label>
+                  <input type="text" name="HEALTH_ICMP_TARGET_IPS" value={config.HEALTH_ICMP_TARGET_IPS || ''} onChange={handleChange} className="text-input" placeholder="1.1.1.1,8.8.8.8" />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Health Server Address</label>
+                <input type="text" name="HEALTH_SERVER_ADDRESS" value={config.HEALTH_SERVER_ADDRESS || ''} onChange={handleChange} className="text-input" placeholder="127.0.0.1:9999" />
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
               
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>update</span>
-                Servers Updater Configuration
+                Servers Updater
               </h3>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div className="form-group">
                   <label>Updater Period</label>
-                  <input type="text" name="UPDATER_PERIOD" value={config.UPDATER_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="e.g. 24h, 0 to disable" />
+                  <input type="text" name="UPDATER_PERIOD" value={config.UPDATER_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="24h (0 to disable)" />
                 </div>
                 <div className="form-group">
                   <label>Updater Min Ratio</label>
-                  <input type="number" step="0.1" name="UPDATER_MIN_RATIO" value={config.UPDATER_MIN_RATIO || ''} onChange={handleChange} className="text-input" placeholder="e.g. 1.0" />
+                  <input type="number" step="0.1" name="UPDATER_MIN_RATIO" value={config.UPDATER_MIN_RATIO || ''} onChange={handleChange} className="text-input" placeholder="0.8" />
                 </div>
               </div>
               <div className="form-group">
@@ -743,15 +1251,95 @@ export default function Settings() {
                 <input type="text" name="UPDATER_VPN_SERVICE_PROVIDERS" value={config.UPDATER_VPN_SERVICE_PROVIDERS || ''} onChange={handleChange} className="text-input" placeholder="Comma separated, e.g. mullvad,pia" />
               </div>
 
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>ProtonVPN Email (for paid server data)</label>
+                  <input type="text" name="UPDATER_PROTONVPN_EMAIL" value={config.UPDATER_PROTONVPN_EMAIL || ''} onChange={handleChange} className="text-input" placeholder="proton@email.com" />
+                </div>
+                <div className="form-group">
+                  <label>ProtonVPN Password</label>
+                  <input type="password" name="UPDATER_PROTONVPN_PASSWORD" value={config.UPDATER_PROTONVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="ProtonVPN account password" />
+                </div>
+              </div>
+
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
               
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>more_horiz</span>
-                Miscellaneous Settings
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>settings</span>
+                System & Identity
               </h3>
-              <div className="form-group">
-                <label>Timezone (TZ)</label>
-                <input type="text" name="TZ" value={config.TZ || ''} onChange={handleChange} className="text-input" placeholder="e.g. America/New_York" />
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Timezone (TZ)</label>
+                  <input type="text" name="TZ" value={config.TZ || ''} onChange={handleChange} className="text-input" placeholder="America/New_York" />
+                </div>
+                <div className="form-group">
+                  <label>PUID (User ID)</label>
+                  <input type="number" name="PUID" value={config.PUID || ''} onChange={handleChange} className="text-input" placeholder="1000" />
+                </div>
+                <div className="form-group">
+                  <label>PGID (Group ID)</label>
+                  <input type="number" name="PGID" value={config.PGID || ''} onChange={handleChange} className="text-input" placeholder="1000" />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>VPN Interface Name</label>
+                  <input type="text" name="VPN_INTERFACE" value={config.VPN_INTERFACE || ''} onChange={handleChange} className="text-input" placeholder="tun0" />
+                </div>
+                <div className="form-group">
+                  <label>Public IP API</label>
+                  <input type="text" name="PUBLICIP_API" value={config.PUBLICIP_API || ''} onChange={handleChange} className="text-input" placeholder="ipinfo,ifconfigco,ip2location,cloudflare" />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>Public IP API Token</label>
+                  <input type="password" name="PUBLICIP_API_TOKEN" value={config.PUBLICIP_API_TOKEN || ''} onChange={handleChange} className="text-input" placeholder="Optional API token for rate limiting" />
+                </div>
+                <div className="form-group">
+                  <label>Public IP File Path</label>
+                  <input type="text" name="PUBLICIP_FILE" value={config.PUBLICIP_FILE || ''} onChange={handleChange} className="text-input" placeholder="/tmp/gluetun/ip" />
+                </div>
+              </div>
+
+              <div className="toggle-switch-container" style={{ marginTop: '8px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '15px' }}>Version Information</strong>
+                  <span>Log a message if a newer Gluetun version is available</span>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" name="VERSION_INFORMATION" checked={config.VERSION_INFORMATION !== 'off'} onChange={handleChange} />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>terminal</span>
+                VPN Lifecycle Hooks
+              </h3>
+
+              <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
+                <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
+                  Shell commands executed when VPN connects/disconnects. Use <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>{'{{VPN_INTERFACE}}'}</code> as a template variable.
+                </p>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>VPN Up Command</label>
+                  <input type="text" name="VPN_UP_COMMAND" value={config.VPN_UP_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="/bin/sh -c 'echo connected'" />
+                </div>
+                <div className="form-group">
+                  <label>VPN Down Command</label>
+                  <input type="text" name="VPN_DOWN_COMMAND" value={config.VPN_DOWN_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="/bin/sh -c 'echo disconnected'" />
+                </div>
               </div>
 
             </>
