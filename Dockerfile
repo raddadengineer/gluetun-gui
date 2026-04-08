@@ -28,14 +28,7 @@ COPY --from=frontend-builder /app/dist ./public/
 COPY --from=go-builder /app/pia-wg-config /usr/local/bin/pia-wg-config
 RUN chmod +x /usr/local/bin/pia-wg-config
 
-# Pre-create blank env files so volume mounts work on first run without manual setup
-RUN touch /usr/src/app/.env \
-    && touch /gluetun.env
-
-# Copy and install the entrypoint script
-COPY server/entrypoint.sh /usr/src/app/entrypoint.sh
-RUN chmod +x /usr/src/app/entrypoint.sh
-
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
+# Start the Express API and Static File Server
+CMD ["node", "index.js"]

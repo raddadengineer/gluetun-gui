@@ -7,8 +7,12 @@ export default function Logs() {
   const [autoScroll, setAutoScroll] = useState(true);
   const [logLevel, setLogLevel] = useState('info');
   const [loadingConfig, setLoadingConfig] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const isPausedRef = useRef(isPaused);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
+
+  useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
 
   useEffect(() => {
     // Fetch initial log level
@@ -23,6 +27,7 @@ export default function Logs() {
     const eventSource = new EventSource(`/api/logs?token=${token}`);
 
     eventSource.onmessage = (event) => {
+      if (isPausedRef.current) return;
       try {
         let line = JSON.parse(event.data);
         if (line && line.trim() !== '') {
@@ -41,8 +46,8 @@ export default function Logs() {
   }, []);
 
   useEffect(() => {
-    if (autoScroll && bottomRef.current) {
-      bottomRef.current.scrollIntoView();
+    if (autoScroll && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
     }
   }, [logs, autoScroll]);
 
@@ -80,7 +85,7 @@ export default function Logs() {
   }, [logs, filter]);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '20px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)', minHeight: 0, gap: '20px' }}>
       <header className="header" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div className="header-title">
           <h2>System Logs</h2>
@@ -134,9 +139,12 @@ export default function Logs() {
             Word Wrap
           </label>
           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '14px' }}>
-            <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
+            <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} disabled={isPaused} />
             Auto-Scroll Bottom
           </label>
+          <button onClick={() => setIsPaused(!isPaused)} className="btn" style={{ background: isPaused ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', color: isPaused ? 'var(--success)' : '#f59e0b', padding: '8px 16px', fontSize: '14px', border: `1px solid ${isPaused ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}` }}>
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>{isPaused ? 'play_arrow' : 'pause'}</span> {isPaused ? 'Resume Stream' : 'Pause Stream'}
+          </button>
           <button onClick={() => setLogs([])} className="btn" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', padding: '8px 16px', fontSize: '14px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
             <span className="material-icons-round" style={{ fontSize: '18px' }}>delete_sweep</span> Clear
           </button>
@@ -145,6 +153,7 @@ export default function Logs() {
 
       <div className="glass-panel" style={{
         flex: 1,
+        minHeight: 0,
         display: 'flex',
         flexDirection: 'column',
         background: '#0d1117',
@@ -165,7 +174,7 @@ export default function Logs() {
           <div style={{ width: '12px', height: '12px', borderRadius: '50%', background: '#27c93f' }} />
         </div>
 
-        <div ref={logsContainerRef} style={{
+        <div ref={logsContainerRef} className="custom-scrollbar" style={{
           flex: 1,
           padding: '16px 0',
           overflowY: 'auto',

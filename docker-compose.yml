@@ -6,13 +6,13 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
-    env_file:
-      - path: ./gluetun.env
-        required: false        # File is created automatically by the GUI on first save
     ports:
-      - "8888:8888/tcp"       # HTTP proxy
-      - "8388:8388/tcp"       # Shadowsocks
-      - "8388:8388/udp"       # Shadowsocks
+      - "8888:8888/tcp" # HTTP proxy
+      - "8388:8388/tcp" # Shadowsocks
+      - "8388:8388/udp" # Shadowsocks
+    # NOTE: No env_file needed — the GUI manages Gluetun's
+    # environment variables dynamically via Docker API.
+    # On first run, set initial VPN config through the GUI (port 3000).
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
@@ -21,12 +21,12 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      # MANDATORY: Required for the GUI to monitor and control the Gluetun container
+      # REQUIRED: Docker socket for container orchestration
       - /var/run/docker.sock:/var/run/docker.sock
-      # Persistent GUI settings (password, PIA credentials, proxy toggles, etc.)
-      - ./gui-settings.env:/usr/src/app/.env
-      # REQUIRED for PIA WireGuard key generation and Gluetun config management
-      - ./gluetun-config:/config
-      - ./gluetun.env:/gluetun.env
+      # Persistent data directory (GUI config, session history, WireGuard configs)
+      - ./data:/data
+    environment:
+      # All GUI data files will live under /data
+      - DATA_DIR=/data
     depends_on:
       - gluetun

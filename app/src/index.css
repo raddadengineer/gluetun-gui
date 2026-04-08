@@ -471,9 +471,7 @@ input:checked+.slider:before {
   top: 100%;
   right: 0;
   margin-top: 8px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--bg-color);
   border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 8px;
@@ -481,7 +479,7 @@ input:checked+.slider:before {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   z-index: 100;
 }
 

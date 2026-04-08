@@ -4,3 +4,6 @@ node_modules/
 *.env
 *.conf
 
+# Persistent data (user-specific)
+data/
+sessions.json

@@ -9,10 +9,12 @@ export default function Settings() {
   // PIA WireGuard state
   const [piaUsername, setPiaUsername] = useState('');
   const [piaPassword, setPiaPassword] = useState('');
-  const [piaRegionsList, setPiaRegionsList] = useState([]);
+  const [piaWgRegionsList, setPiaWgRegionsList] = useState([]);
+  const [piaOpenVpnRegionsList, setPiaOpenVpnRegionsList] = useState([]);
   const [piaPortForwarding, setPiaPortForwarding] = useState(false);
   const [piaGenerating, setPiaGenerating] = useState(false);
   const [piaStatus, setPiaStatus] = useState(null);
+  const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [piaRegions, setPiaRegions] = useState([]);         // WireGuard regions (from PIA API)
   const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // OpenVPN regions (from gluetun servers.json)
 
@@ -30,8 +32,17 @@ export default function Settings() {
         setConfig(data);
         if (data.PIA_USERNAME) setPiaUsername(data.PIA_USERNAME);
         if (data.PIA_PASSWORD) setPiaPassword(data.PIA_PASSWORD);
-        if (data.PIA_REGIONS) setPiaRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
-        else if (data.PIA_REGION) setPiaRegionsList([data.PIA_REGION]);
+        if (data.PIA_WG_REGIONS) setPiaWgRegionsList(data.PIA_WG_REGIONS.split(',').filter(Boolean));
+        if (data.PIA_OPENVPN_REGIONS) setPiaOpenVpnRegionsList(data.PIA_OPENVPN_REGIONS.split(',').filter(Boolean));
+        if (!data.PIA_WG_REGIONS && !data.PIA_OPENVPN_REGIONS) {
+          if (data.PIA_REGIONS) {
+            setPiaWgRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
+            setPiaOpenVpnRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
+          } else if (data.PIA_REGION) {
+            setPiaWgRegionsList([data.PIA_REGION]);
+            setPiaOpenVpnRegionsList([data.PIA_REGION]);
+          }
+        }
         if (data.PIA_PORT_FORWARDING === 'true') setPiaPortForwarding(true);
       })
       .catch(console.error);
@@ -46,6 +57,17 @@ export default function Settings() {
       .then(r => r.json())
       .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
       .catch(console.error);
+
+    // Initial monitoring fetch
+    const fetchMonitoring = () => {
+      fetch('/api/pia/monitoring', { headers: { 'Authorization': `Bearer ${token}` } })
+        .then(r => r.json())
+        .then(data => setPiaMonitoring(data))
+        .catch(console.error);
+    };
+    fetchMonitoring();
+    const monitorInterval = setInterval(fetchMonitoring, 30000);
+    return () => clearInterval(monitorInterval);
   }, []);
 
   const fetchPiaRegions = () => {
@@ -203,7 +225,9 @@ export default function Settings() {
         body: JSON.stringify({
           PIA_USERNAME: piaUsername,
           PIA_PASSWORD: piaPassword,
-          PIA_REGIONS: piaRegionsList.join(','),
+          PIA_REGIONS: piaWgRegionsList.join(','),
+          PIA_WG_REGIONS: piaWgRegionsList.join(','),
+          PIA_OPENVPN_REGIONS: piaOpenVpnRegionsList.join(','),
           PIA_PORT_FORWARDING: piaPortForwarding ? 'true' : 'false'
         })
       });
@@ -273,7 +297,13 @@ export default function Settings() {
     setSaving(true);
     try {
       const token = localStorage.getItem('token');
-      const saveData = { ...config, PIA_REGIONS: piaRegionsList.join(',') };
+      const activePiaRegions = (config.VPN_TYPE === 'openvpn') ? piaOpenVpnRegionsList.join(',') : piaWgRegionsList.join(',');
+      const saveData = { 
+        ...config, 
+        PIA_REGIONS: activePiaRegions,
+        PIA_WG_REGIONS: piaWgRegionsList.join(','),
+        PIA_OPENVPN_REGIONS: piaOpenVpnRegionsList.join(',')
+      };
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: {
@@ -403,20 +433,42 @@ export default function Settings() {
                         </p>
                       </div>
 
-                      {piaStatus && piaStatus.state !== 'idle' && (
+                      {piaMonitoring && (
                         <div style={{
-                          padding: '16px', borderRadius: '10px',
-                          background: piaStatus.state === 'success' ? 'rgba(16, 185, 129, 0.1)' : piaStatus.state === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)',
-                          border: `1px solid ${piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)'}`,
-                          display: 'flex', alignItems: 'center', gap: '12px'
+                          padding: '16px', borderRadius: '10px', marginBottom: '20px',
+                          background: piaMonitoring.failCount === 0 && (piaMonitoring.pfFailCount === 0 || !piaPortForwarding) ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)',
+                          border: `1px solid ${piaMonitoring.failCount === 0 && (piaMonitoring.pfFailCount === 0 || !piaPortForwarding) ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
                         }}>
-                          <span className="material-icons-round" style={{ color: piaStatus.state === 'success' ? 'var(--success)' : piaStatus.state === 'error' ? 'var(--danger)' : 'var(--accent-primary)' }}>
-                            {piaStatus.state === 'success' ? 'check_circle' : piaStatus.state === 'error' ? 'error' : 'hourglass_top'}
-                          </span>
-                          <div>
-                            <strong style={{ fontSize: '14px' }}>{piaStatus.state === 'success' ? 'Connected' : piaStatus.state === 'error' ? 'Error' : 'Working...'}</strong>
-                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>{piaStatus.message}</p>
-                            {piaStatus.lastGenerated && <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' }}>Last generated: {new Date(piaStatus.lastGenerated).toLocaleString()}</p>}
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div style={{
+                              width: '10px', height: '10px', borderRadius: '50%',
+                              background: piaMonitoring.failCount === 0 ? 'var(--success)' : 'var(--danger)',
+                              boxShadow: `0 0 8px ${piaMonitoring.failCount === 0 ? 'var(--success)' : 'var(--danger)'}`
+                            }} />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <strong style={{ fontSize: '14px', color: '#fff' }}>
+                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/3)`}
+                                </strong>
+                                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                  Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
+                                </span>
+                              </div>
+                              {piaPortForwarding && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', fontSize: '12px' }}>
+                                  <span className="material-icons-round" style={{ fontSize: '14px', color: piaMonitoring.pfFailCount === 0 ? 'var(--success)' : 'var(--warning)' }}>
+                                    {piaMonitoring.pfFailCount === 0 ? 'hub' : 'warning'}
+                                  </span>
+                                  <span style={{ color: 'var(--text-secondary)' }}>
+                                    Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
+                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.lastForwardedPort || 'Pending'})</strong>
+                                    ) : (
+                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
+                                    )}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -440,20 +492,27 @@ export default function Settings() {
                       <div className="form-group">
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                           <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
-                            <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>{piaRegionsList.length} selected</span>
+                            <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>{piaWgRegionsList.length} selected</span>
                           </label>
-                          <button type="button" onClick={fetchPiaRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(59,130,246,0.1)' }}>
-                            <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Refresh
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            {piaWgRegionsList.length > 0 && (
+                              <button type="button" onClick={() => setPiaWgRegionsList([])} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                <span className="material-icons-round" style={{ fontSize: '13px' }}>clear_all</span> Clear
+                              </button>
+                            )}
+                            <button type="button" onClick={fetchPiaRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(59,130,246,0.1)' }}>
+                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Refresh
+                            </button>
+                          </div>
                         </div>
                         <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                           <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '180px', overflowY: 'auto', padding: '4px' }}>
                             {piaRegions.length > 0 ? piaRegions.map(r => {
-                              const isSelected = piaRegionsList.includes(r.id);
+                              const isSelected = piaWgRegionsList.includes(r.id);
                               return (
                                 <div key={r.id} onClick={() => {
-                                  if (isSelected) setPiaRegionsList(piaRegionsList.filter(x => x !== r.id));
-                                  else setPiaRegionsList([...piaRegionsList, r.id]);
+                                  if (isSelected) setPiaWgRegionsList(piaWgRegionsList.filter(x => x !== r.id));
+                                  else setPiaWgRegionsList([...piaWgRegionsList, r.id]);
                                 }} style={{
                                   padding: '5px 11px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
                                   display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
@@ -473,7 +532,7 @@ export default function Settings() {
                             )}
                           </div>
                           <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
-                            Failover order: <strong style={{ color: 'var(--accent-primary)' }}>{piaRegionsList.join(' ➜ ') || 'None selected'}</strong>
+                            Failover order: <strong style={{ color: 'var(--accent-primary)' }}>{piaWgRegionsList.join(' ➜ ') || 'None selected'}</strong>
                           </p>
                         </div>
                       </div>
@@ -502,7 +561,7 @@ export default function Settings() {
 
                       <button
                         type="button" onClick={handlePiaGenerate}
-                        disabled={piaGenerating || !piaUsername || !piaPassword || piaRegionsList.length === 0}
+                        disabled={piaGenerating || !piaUsername || !piaPassword || piaWgRegionsList.length === 0}
                         className="btn btn-primary"
                         style={{ width: '100%', padding: '14px', fontSize: '15px' }}
                       >
@@ -526,6 +585,46 @@ export default function Settings() {
                         </p>
                       </div>
 
+                      {piaMonitoring && (
+                        <div style={{
+                          padding: '16px', borderRadius: '10px', marginTop: '20px',
+                          background: piaMonitoring.failCount === 0 && (piaMonitoring.pfFailCount === 0 || !piaPortForwarding) ? 'rgba(16, 185, 129, 0.08)' : 'rgba(245, 158, 11, 0.08)',
+                          border: `1px solid ${piaMonitoring.failCount === 0 && (piaMonitoring.pfFailCount === 0 || !piaPortForwarding) ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
+                        }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div style={{
+                              width: '10px', height: '10px', borderRadius: '50%',
+                              background: piaMonitoring.failCount === 0 ? 'var(--success)' : 'var(--danger)',
+                              boxShadow: `0 0 8px ${piaMonitoring.failCount === 0 ? 'var(--success)' : 'var(--danger)'}`
+                            }} />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <strong style={{ fontSize: '14px', color: '#fff' }}>
+                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/3)`}
+                                </strong>
+                                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                                  Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
+                                </span>
+                              </div>
+                              {piaPortForwarding && (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px', fontSize: '12px' }}>
+                                  <span className="material-icons-round" style={{ fontSize: '14px', color: piaMonitoring.pfFailCount === 0 ? 'var(--success)' : 'var(--warning)' }}>
+                                    {piaMonitoring.pfFailCount === 0 ? 'hub' : 'warning'}
+                                  </span>
+                                  <span style={{ color: 'var(--text-secondary)' }}>
+                                    Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
+                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.lastForwardedPort || 'Pending'})</strong>
+                                    ) : (
+                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
+                                    )}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       <h3 style={{ fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginBottom: 0 }}>
                         <span className="material-icons-round" style={{ color: 'var(--success)', fontSize: '20px' }}>key</span>
                         PIA Account Credentials
@@ -546,21 +645,28 @@ export default function Settings() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                           <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
                             <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
-                              {piaRegionsList.length} selected
+                              {piaOpenVpnRegionsList.length} selected
                             </span>
                           </label>
-                          <button type="button" onClick={fetchPiaOpenVpnRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>
-                            <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch Regions
-                          </button>
+                          <div style={{ display: 'flex', gap: '8px' }}>
+                            {piaOpenVpnRegionsList.length > 0 && (
+                              <button type="button" onClick={() => setPiaOpenVpnRegionsList([])} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                <span className="material-icons-round" style={{ fontSize: '13px' }}>clear_all</span> Clear
+                              </button>
+                            )}
+                            <button type="button" onClick={fetchPiaOpenVpnRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>
+                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch Regions
+                            </button>
+                          </div>
                         </div>
                         <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                           <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '200px', overflowY: 'auto', padding: '4px' }}>
                             {piaOpenVpnRegions.length > 0 ? piaOpenVpnRegions.map(region => {
-                              const isSelected = piaRegionsList.includes(region);
+                              const isSelected = piaOpenVpnRegionsList.includes(region);
                               return (
                                 <div key={region} onClick={() => {
-                                  if (isSelected) setPiaRegionsList(piaRegionsList.filter(x => x !== region));
-                                  else setPiaRegionsList([...piaRegionsList, region]);
+                                  if (isSelected) setPiaOpenVpnRegionsList(piaOpenVpnRegionsList.filter(x => x !== region));
+                                  else setPiaOpenVpnRegionsList([...piaOpenVpnRegionsList, region]);
                                 }} style={{
                                   padding: '5px 12px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
                                   display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
@@ -579,7 +685,7 @@ export default function Settings() {
                             )}
                           </div>
                           <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
-                            Failover order: <strong style={{ color: 'var(--success)' }}>{piaRegionsList.join(' ➜ ') || 'None selected'}</strong>
+                            Failover order: <strong style={{ color: 'var(--success)' }}>{piaOpenVpnRegionsList.join(' ➜ ') || 'None selected'}</strong>
                           </p>
                         </div>
                       </div>
@@ -623,7 +729,7 @@ export default function Settings() {
 
                       <button
                         type="button" onClick={handleSave}
-                        disabled={saving || !config.OPENVPN_USER || !config.OPENVPN_PASSWORD || piaRegionsList.length === 0}
+                        disabled={saving || !config.OPENVPN_USER || !config.OPENVPN_PASSWORD || piaOpenVpnRegionsList.length === 0}
                         className="btn btn-primary"
                         style={{ width: '100%', padding: '14px', fontSize: '15px', background: 'var(--success)', boxShadow: '0 4px 14px rgba(16,185,129,0.3)' }}
                       >

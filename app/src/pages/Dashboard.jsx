@@ -213,7 +213,7 @@ export default function Dashboard() {
           <p>Manage your VPN connections and proxy settings instantly</p>
         </div>
         <div style={{ position: 'relative' }}>
-          <button className="btn" style={{ background: 'var(--glass-bg)', border: '1px solid var(--glass-border)' }} onClick={() => setMenuOpen(!menuOpen)}>
+          <button className="btn btn-primary" style={{ color: '#ffffff' }} onClick={() => setMenuOpen(!menuOpen)}>
             <span className="material-icons-round">settings</span>
             Quick Actions
             <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>arrow_drop_down</span>
@@ -251,8 +251,25 @@ export default function Dashboard() {
 
           <div className="status-info">
             <h3>{status?.parsedEnv?.VPN_SERVICE_PROVIDER || 'Mullvad'}</h3>
-            <p>
-              <span className="material-icons-round" style={{ fontSize: '16px' }}>schedule</span>
+            {status?.currentSession?.publicIp ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', margin: '6px 0 8px 0' }}>
+                <span style={{ fontSize: '14px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
+                  <span className="material-icons-round" style={{ fontSize: '16px' }}>my_location</span>
+                  {status.currentSession.publicIp} • {status.currentSession.location}
+                </span>
+                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <span className="material-icons-round" style={{ fontSize: '14px' }}>dns</span>
+                  Active Node: {status.currentSession.serverIp || 'Resolving...'}
+                </span>
+              </div>
+            ) : isConnected && (
+              <div style={{ margin: '6px 0 8px 0', fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span className="material-icons-round" style={{ fontSize: '14px', animation: 'spin 1s linear infinite' }}>refresh</span> 
+                Acquiring Connection Details...
+              </div>
+            )}
+            <p style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-secondary)' }}>
+              <span className="material-icons-round" style={{ fontSize: '14px' }}>schedule</span>
               {status?.startedAt ? `Connected ${formatDistanceToNow(new Date(status.startedAt))} ago` : 'Uptime Unknown'}
             </p>
           </div>

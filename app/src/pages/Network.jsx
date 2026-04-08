@@ -386,14 +386,20 @@ export default function Network() {
                               {sess.vpnType}
                             </span>
                           </div>
-                          <p style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
-                            <span className="material-icons-round" style={{ fontSize: '14px', verticalAlign: 'middle', marginRight: '4px' }}>place</span>
-                            {sess.region}
-                            <span style={{ margin: '0 10px', opacity: 0.3 }}>|</span>
-                            <span className="material-icons-round" style={{ fontSize: '14px', verticalAlign: 'middle', marginRight: '4px' }}>schedule</span>
-                            Started {fmtDate(sess.startedAt)}
-                            {sess.endedAt && <> · ended {fmtDate(sess.endedAt)}</>}
-                          </p>
+                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <p>
+                              <span className="material-icons-round" style={{ fontSize: '14px', verticalAlign: 'middle', marginRight: '4px', color: sess.publicIp ? '#10b981' : 'inherit' }}>my_location</span>
+                              {sess.publicIp ? `${sess.publicIp} • ${sess.location}` : `Configured: ${sess.region}`}
+                              <span style={{ margin: '0 10px', opacity: 0.3 }}>|</span>
+                              <span className="material-icons-round" style={{ fontSize: '14px', verticalAlign: 'middle', marginRight: '4px' }}>dns</span>
+                              Node: {sess.serverIp || 'Unknown'}
+                            </p>
+                            <p>
+                              <span className="material-icons-round" style={{ fontSize: '14px', verticalAlign: 'middle', marginRight: '4px' }}>schedule</span>
+                              Started {fmtDate(sess.startedAt)}
+                              {sess.endedAt && <> · ended {fmtDate(sess.endedAt)}</>}
+                            </p>
+                          </div>
                         </div>
                         {!sess.active && (
                           <button onClick={() => deleteSession(sess.id)} className="btn" style={{ padding: '6px 12px', fontSize: '12px', background: 'rgba(239,68,68,0.08)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)', flexShrink: 0 }}>
