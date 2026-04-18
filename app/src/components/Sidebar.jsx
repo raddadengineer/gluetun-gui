@@ -1,6 +1,9 @@
 import { NavLink } from 'react-router-dom';
+import NotificationsBell from './NotificationsBell';
+import { useTheme } from '../contexts/ThemeContext';
 
 export default function Sidebar() {
+  const { theme, setTheme, themes } = useTheme();
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -28,17 +31,23 @@ export default function Sidebar() {
       </nav>
 
       <div style={{ marginTop: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-        <button 
-          className="nav-item" 
-          style={{ width: '100%', justifyContent: 'flex-start', background: 'transparent' }}
-          onClick={() => {
-            const current = document.documentElement.getAttribute('data-theme');
-            document.documentElement.setAttribute('data-theme', current === 'light' ? 'dark' : 'light');
-          }}
-        >
-          <span className="material-icons-round">brightness_4</span>
-          Toggle Theme
-        </button>
+        <NotificationsBell />
+        <div className="glass-panel" style={{ padding: '12px', borderRadius: '14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', color: 'var(--text-secondary)' }}>
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>palette</span>
+            <strong style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)' }}>Theme</strong>
+          </div>
+          <select
+            className="select-input"
+            value={theme}
+            onChange={(e) => setTheme(e.target.value)}
+            style={{ width: '100%' }}
+          >
+            {themes.map(t => (
+              <option key={t.id} value={t.id}>{t.label}</option>
+            ))}
+          </select>
+        </div>
         <button 
           className="btn" 
           style={{ width: '100%', justifyContent: 'center', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.2)' }}

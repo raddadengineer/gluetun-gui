@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { useNotifications } from '../contexts/NotificationsContext';
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { notify } = useNotifications();
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -131,6 +133,30 @@ export default function Dashboard() {
     }
   };
 
+  // Notifications from monitoring state (deduped)
+  useEffect(() => {
+    if (!piaMonitoring) return;
+    if (typeof piaMonitoring.failCount === 'number' && piaMonitoring.failCount > 0) {
+      notify({
+        level: 'warning',
+        title: `VPN connectivity issues (${piaMonitoring.failCount}/3)`,
+        message: piaMonitoring.publicIp ? `Public IP: ${piaMonitoring.publicIp}` : 'Monitoring detected connectivity problems.',
+        source: 'monitor',
+        dedupeKey: 'monitor_connectivity',
+      });
+    }
+    if (piaMonitoring.portForwarding && (piaMonitoring.port || piaMonitoring.lastForwardedPort)) {
+      const p = piaMonitoring.port || piaMonitoring.lastForwardedPort;
+      notify({
+        level: 'success',
+        title: 'Port forwarding active',
+        message: `Forwarded port: ${p}`,
+        source: 'monitor',
+        dedupeKey: 'monitor_pf_active',
+      });
+    }
+  }, [notify, piaMonitoring]);
+
   useEffect(() => {
     fetchStatus();
     fetchMetrics();
@@ -158,7 +184,7 @@ export default function Dashboard() {
       const updatedConfig = { ...currentConfig, [key]: newValue };
 
       // 3. Save new config
-      await fetch('/api/config', {
+      const saveRes = await fetch('/api/config', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -169,8 +195,27 @@ export default function Dashboard() {
 
       // 4. Refresh status to update UI
       await fetchStatus();
+      if (saveRes.ok) {
+        notify({
+          level: 'success',
+          title: 'Setting updated',
+          message: `${key} is now ${newValue}`,
+          source: 'dashboard',
+          dedupeKey: `toggle_${key}`,
+        });
+      } else {
+        const errData = await saveRes.json().catch(() => ({}));
+        notify({
+          level: 'error',
+          title: 'Setting update failed',
+          message: errData.error || `HTTP ${saveRes.status}`,
+          source: 'dashboard',
+          dedupeKey: `toggle_err_${key}`,
+        });
+      }
     } catch (err) {
       console.error("Error toggling setting:", err);
+      notify({ level: 'error', title: 'Setting update failed', message: err.message, source: 'dashboard', dedupeKey: 'toggle_exc' });
     } finally {
       setLoading(false);
     }
@@ -180,13 +225,20 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      await fetch('/api/restart', {
+      const res = await fetch('/api/restart', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
       await fetchStatus();
+      if (res.ok) {
+        notify({ level: 'success', title: 'Gluetun restarted', message: 'VPN container restart completed.', source: 'dashboard', dedupeKey: 'gluetun_restart' });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        notify({ level: 'error', title: 'Restart failed', message: err.error || `HTTP ${res.status}`, source: 'dashboard', dedupeKey: 'gluetun_restart_err' });
+      }
     } catch (e) {
       console.error(e);
+      notify({ level: 'error', title: 'Restart failed', message: e.message, source: 'dashboard', dedupeKey: 'gluetun_restart_exc' });
       setLoading(false);
     }
   };
@@ -195,13 +247,20 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      await fetch('/api/stop', {
+      const res = await fetch('/api/stop', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
       await fetchStatus();
+      if (res.ok) {
+        notify({ level: 'warning', title: 'Gluetun stopped', message: 'VPN container was stopped.', source: 'dashboard', dedupeKey: 'gluetun_stop' });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        notify({ level: 'error', title: 'Stop failed', message: err.error || `HTTP ${res.status}`, source: 'dashboard', dedupeKey: 'gluetun_stop_err' });
+      }
     } catch (e) {
       console.error(e);
+      notify({ level: 'error', title: 'Stop failed', message: e.message, source: 'dashboard', dedupeKey: 'gluetun_stop_exc' });
       setLoading(false);
     }
   };
@@ -210,13 +269,27 @@ export default function Dashboard() {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
-      await fetch('/api/test-failover', {
+      const res = await fetch('/api/test-failover', {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
       await fetchStatus();
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        notify({
+          level: 'success',
+          title: 'Failover rotation run',
+          message: (data.message || 'Region rotation executed.').slice(0, 200),
+          source: 'dashboard',
+          dedupeKey: 'test_failover_ok',
+        });
+      } else {
+        const err = await res.json().catch(() => ({}));
+        notify({ level: 'error', title: 'Failover failed', message: err.error || `HTTP ${res.status}`, source: 'dashboard', dedupeKey: 'test_failover_err' });
+      }
     } catch (e) {
       console.error(e);
+      notify({ level: 'error', title: 'Failover failed', message: e.message, source: 'dashboard', dedupeKey: 'test_failover_exc' });
       setLoading(false);
     }
   };

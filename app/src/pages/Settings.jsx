@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNotifications } from '../contexts/NotificationsContext';
 
 export default function Settings() {
+  const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
   const [config, setConfig] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [activeTab, setActiveTab] = useState('general');
+
+  // GUI auth password change (never pre-filled)
+  const [guiPasswordNew, setGuiPasswordNew] = useState('');
+  const [guiPasswordConfirm, setGuiPasswordConfirm] = useState('');
 
   // PIA WireGuard state
   const [piaUsername, setPiaUsername] = useState('');
@@ -16,7 +22,7 @@ export default function Settings() {
   const [piaStatus, setPiaStatus] = useState(null);
   const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [piaRegions, setPiaRegions] = useState([]);         // WireGuard regions (from PIA API)
-  const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // OpenVPN regions (from gluetun servers.json)
+  const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // OpenVPN server names (gluetun servers.json)
 
   // Dynamic server options state
   const [serverOptions, setServerOptions] = useState({ countries: [], regions: [], cities: [], hostnames: [], server_names: [] });
@@ -34,13 +40,18 @@ export default function Settings() {
         if (data.PIA_PASSWORD) setPiaPassword(data.PIA_PASSWORD);
         if (data.PIA_WG_REGIONS) setPiaWgRegionsList(data.PIA_WG_REGIONS.split(',').filter(Boolean));
         if (data.PIA_OPENVPN_REGIONS) setPiaOpenVpnRegionsList(data.PIA_OPENVPN_REGIONS.split(',').filter(Boolean));
+        // Legacy PIA_REGIONS: never copy WireGuard-style ids into the OpenVPN list unless last save was OpenVPN
         if (!data.PIA_WG_REGIONS && !data.PIA_OPENVPN_REGIONS) {
           if (data.PIA_REGIONS) {
             setPiaWgRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
-            setPiaOpenVpnRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
+            if ((data.VPN_TYPE || '').toLowerCase() === 'openvpn') {
+              setPiaOpenVpnRegionsList(data.PIA_REGIONS.split(',').filter(Boolean));
+            }
           } else if (data.PIA_REGION) {
             setPiaWgRegionsList([data.PIA_REGION]);
-            setPiaOpenVpnRegionsList([data.PIA_REGION]);
+            if ((data.VPN_TYPE || '').toLowerCase() === 'openvpn') {
+              setPiaOpenVpnRegionsList([data.PIA_REGION]);
+            }
           }
         }
         if (data.PIA_PORT_FORWARDING === 'true' || data.PIA_PORT_FORWARDING === 'on') setPiaPortForwarding(true);
@@ -105,6 +116,7 @@ export default function Settings() {
     } catch (e) {
       console.error(e);
       setMessage({ type: 'error', text: e.message || 'Failed to fetch PIA regions.' });
+      notify({ level: 'error', title: 'PIA regions fetch failed', message: e.message, source: 'settings', dedupeKey: 'pia_regions_fetch' });
       setTimeout(() => setMessage(null), 4000);
     }
   };
@@ -135,23 +147,46 @@ export default function Settings() {
     return piaWgRegionsList.map(id => piaRegionNameById.get(id) || id).join(' ➜ ');
   }, [piaRegionNameById, piaWgRegionsList]);
 
-  const fetchPiaOpenVpnRegions = async () => {
+  const fetchPiaOpenVpnRegions = useCallback(async () => {
     try {
       const token = localStorage.getItem('token');
       const res = await fetch(
         '/api/helpers/servers?provider=private%20internet%20access&vpnType=openvpn',
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
-      if (res.ok) {
-        const data = await res.json();
-        // PIA OpenVPN uses SERVER_REGIONS — combine regions + countries for a full list
-        const combined = Array.from(new Set([...data.regions, ...data.countries])).sort((a,b) => a.localeCompare(b));
-        setPiaOpenVpnRegions(combined);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to fetch PIA OpenVPN servers (${res.status})${text ? `: ${text}` : ''}`);
       }
+      const data = await res.json();
+      // Gluetun validates SERVER_REGIONS against server *names* (e.g. montreal420), not WG region ids (montreal427)
+      const names = [...(data.server_names || [])].filter(Boolean);
+      const combined = names.length
+        ? Array.from(new Set(names)).sort((a, b) => a.localeCompare(b))
+        : Array.from(new Set([...(data.regions || []), ...(data.countries || [])])).sort((a, b) => a.localeCompare(b));
+      setPiaOpenVpnRegions(combined);
     } catch (e) {
-      console.error('Failed to fetch PIA OpenVPN regions:', e);
+      console.error(e);
+      setMessage({ type: 'error', text: e.message || 'Failed to fetch PIA OpenVPN servers.' });
+      notify({ level: 'error', title: 'PIA OpenVPN list failed', message: e.message, source: 'settings', dedupeKey: 'pia_ov_fetch' });
+      setTimeout(() => setMessage(null), 5000);
     }
-  };
+  }, [notify]);
+
+  useEffect(() => {
+    if (config.VPN_SERVICE_PROVIDER !== 'private internet access') return;
+    if ((config.VPN_TYPE || '') !== 'openvpn') return;
+    fetchPiaOpenVpnRegions();
+  }, [config.VPN_SERVICE_PROVIDER, config.VPN_TYPE, fetchPiaOpenVpnRegions]);
+
+  useEffect(() => {
+    if (!piaOpenVpnRegions.length) return;
+    const allow = new Set(piaOpenVpnRegions);
+    setPiaOpenVpnRegionsList(prev => {
+      const next = prev.filter(x => allow.has(x));
+      return next.length !== prev.length ? next : prev;
+    });
+  }, [piaOpenVpnRegions]);
 
   const fetchServerOptions = async () => {
     setFetchingServers(true);
@@ -207,7 +242,7 @@ export default function Settings() {
   const renderPills = (list, fieldName) => {
     if (!list || list.length === 0) return null;
     return (
-      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '100px', overflowY: 'auto', padding: '6px', background: 'rgba(0,0,0,0.1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
+      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '100px', overflowY: 'auto', padding: '6px', background: 'var(--surface-1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
         {list.map(name => {
           const isSelected = (config[fieldName] || '').split(',').map(s => s.trim()).includes(name);
           return (
@@ -228,7 +263,7 @@ export default function Settings() {
                 borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s',
                 color: isSelected ? '#fff' : 'inherit'
               }}
-              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
+              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'var(--surface-3)'; }}
               onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = 'var(--glass-bg)'; }}
             >
               {name}
@@ -243,7 +278,7 @@ export default function Settings() {
   const renderLinkedPills = (list, fieldName) => {
     if (!list || list.length === 0) return null;
     return (
-      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '120px', overflowY: 'auto', padding: '6px', background: 'rgba(0,0,0,0.1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
+      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '120px', overflowY: 'auto', padding: '6px', background: 'var(--surface-1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
         {list.map(name => {
           const isSelected = (config[fieldName] || '').split(',').map(s => s.trim()).includes(name);
           return (
@@ -260,7 +295,7 @@ export default function Settings() {
                 maxWidth: '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 display: 'inline-flex', alignItems: 'center', gap: '4px',
               }}
-              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'rgba(255,255,255,0.1)'; }}
+              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'var(--surface-3)'; }}
               onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = 'var(--glass-bg)'; }}
             >
               {isSelected && <span className="material-icons-round" style={{ fontSize: '10px' }}>check</span>}
@@ -276,7 +311,7 @@ export default function Settings() {
     const activePiaRegions = ((baseConfig?.VPN_TYPE || config.VPN_TYPE) === 'openvpn')
       ? piaOpenVpnRegionsList.join(',')
       : piaWgRegionsList.join(',');
-    return {
+    const saveData = {
       ...(baseConfig || config),
       PIA_REGIONS: activePiaRegions,
       PIA_WG_REGIONS: piaWgRegionsList.join(','),
@@ -286,6 +321,16 @@ export default function Settings() {
       PIA_USERNAME: piaUsername,
       PIA_PASSWORD: piaPassword,
     };
+    if (guiPasswordNew || guiPasswordConfirm) {
+      if (guiPasswordNew.length < 6) {
+        throw new Error('New password must be at least 6 characters.');
+      }
+      if (guiPasswordNew !== guiPasswordConfirm) {
+        throw new Error('New password and confirmation do not match.');
+      }
+      saveData.GUI_PASSWORD = guiPasswordNew;
+    }
+    return saveData;
   };
 
   const handlePiaGenerate = async () => {
@@ -304,6 +349,11 @@ export default function Settings() {
         const errData = await saveRes.json().catch(() => ({}));
         throw new Error(errData.error || `Failed to save settings (${saveRes.status})`);
       }
+      // Clear password fields if we just changed it successfully
+      if (guiPasswordNew) {
+        setGuiPasswordNew('');
+        setGuiPasswordConfirm('');
+      }
 
       const res = await fetch('/api/pia/generate', {
         method: 'POST',
@@ -321,12 +371,27 @@ export default function Settings() {
       if (res.ok) {
         setMessage({ type: 'success', text: data.message });
         setPiaStatus({ state: 'success', message: data.message, lastGenerated: data.generatedAt, failCount: 0 });
+        notify({
+          level: 'success',
+          title: 'WireGuard keys generated',
+          message: (data.message || '').slice(0, 200),
+          source: 'settings',
+          dedupeKey: 'pia_generate_ok',
+        });
       } else {
         setMessage({ type: 'error', text: data.error || 'Generation failed.' });
         setPiaStatus({ state: 'error', message: data.error, lastGenerated: null, failCount: (piaStatus?.failCount || 0) + 1 });
+        notify({
+          level: 'error',
+          title: 'Key generation failed',
+          message: data.error || 'Generation failed.',
+          source: 'settings',
+          dedupeKey: 'pia_generate_err',
+        });
       }
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      notify({ level: 'error', title: 'Key generation failed', message: err.message, source: 'settings', dedupeKey: 'pia_generate_exc' });
     }
     setPiaGenerating(false);
     setTimeout(() => setMessage(null), 5000);
@@ -395,12 +460,38 @@ export default function Settings() {
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         setMessage({ type: 'success', text: data.message || 'All settings securely saved to .env file!' });
+        notify({
+          level: 'success',
+          title: 'Settings saved',
+          message: (data.message || 'Configuration written and Gluetun updated.').slice(0, 200),
+          source: 'settings',
+          dedupeKey: 'settings_save_ok',
+        });
+        if (guiPasswordNew) {
+          setGuiPasswordNew('');
+          setGuiPasswordConfirm('');
+          notify({
+            level: 'success',
+            title: 'GUI password updated',
+            message: 'Use the new password next time you sign in.',
+            source: 'settings',
+            dedupeKey: 'gui_password_changed',
+          });
+        }
       } else {
         const errData = await res.json().catch(() => ({}));
         setMessage({ type: 'error', text: errData.error || `Server returned ${res.status}: ${res.statusText}` });
+        notify({
+          level: 'error',
+          title: 'Save failed',
+          message: errData.error || `Server returned ${res.status}`,
+          source: 'settings',
+          dedupeKey: 'settings_save_err',
+        });
       }
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
+      notify({ level: 'error', title: 'Save failed', message: err.message, source: 'settings', dedupeKey: 'settings_save_exc' });
     }
     setSaving(false);
     setTimeout(() => setMessage(null), 3000);
@@ -585,7 +676,7 @@ export default function Settings() {
                             </button>
                           </div>
                         </div>
-                        <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
+                        <div style={{ padding: '12px', background: 'var(--surface-2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                           <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '180px', overflowY: 'auto', padding: '4px' }}>
                             {displayPiaRegions.length > 0 ? displayPiaRegions.map(r => {
                               const isSelected = piaWgRegionsList.includes(r.id);
@@ -598,12 +689,12 @@ export default function Settings() {
                                 }} style={{
                                   padding: '5px 11px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
                                   display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
-                                  background: isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.05)',
+                                  background: isSelected ? 'var(--accent-primary)' : 'var(--surface-1)',
                                   color: isSelected ? '#fff' : 'var(--text-secondary)',
-                                  border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'rgba(255,255,255,0.1)'}`
+                                  border: `1px solid ${isSelected ? 'var(--accent-primary)' : 'var(--glass-border)'}`
                                 }}>
                                   {r.name}
-                                  {r.portForward && <span style={{ fontSize: '9px', background: 'rgba(0,0,0,0.35)', padding: '1px 4px', borderRadius: '3px' }}>PF</span>}
+                                  {r.portForward && <span style={{ fontSize: '9px', background: 'var(--code-bg)', padding: '1px 4px', borderRadius: '3px' }}>PF</span>}
                                   {isSelected && <span className="material-icons-round" style={{ fontSize: '12px' }}>check</span>}
                                 </div>
                               );
@@ -630,7 +721,7 @@ export default function Settings() {
                         </div>
                       </div>
 
-                      <div className="toggle-switch-container" style={{ padding: '14px 16px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px' }}>
+                      <div className="toggle-switch-container" style={{ padding: '14px 16px', background: 'var(--surface-2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                         <div className="toggle-info">
                           <strong style={{ fontSize: '15px' }}>Port Forwarding</strong>
                           <span>Only use PIA servers that support port forwarding</span>
@@ -671,7 +762,7 @@ export default function Settings() {
                       <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(16, 185, 129, 0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
                         <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                           <span className="material-icons-round" style={{ color: 'var(--success)' }}>lock</span>
-                          PIA OpenVPN — uses your PIA credentials directly. Select multiple regions for auto-failover rotation.
+                          PIA OpenVPN — uses your PIA credentials directly. Pick Gluetun <strong>server names</strong> (for example <code style={{ fontSize: '12px' }}>montreal420</code>), not WireGuard region ids such as <code style={{ fontSize: '12px' }}>montreal427</code>.
                         </p>
                       </div>
 
@@ -730,10 +821,10 @@ export default function Settings() {
                         </div>
                       </div>
 
-                      {/* OpenVPN Region Tag Cloud */}
+                      {/* OpenVPN server name tag cloud (Gluetun SERVER_REGIONS) */}
                       <div className="form-group">
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                          <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
+                          <label style={{ marginBottom: 0 }}>Servers — Auto-Failover Sequence
                             <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
                               {piaOpenVpnRegionsList.length} selected
                             </span>
@@ -745,11 +836,11 @@ export default function Settings() {
                               </button>
                             )}
                             <button type="button" onClick={fetchPiaOpenVpnRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>
-                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch Regions
+                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch server list
                             </button>
                           </div>
                         </div>
-                        <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
+                        <div style={{ padding: '12px', background: 'var(--surface-2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                           <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '200px', overflowY: 'auto', padding: '4px' }}>
                             {piaOpenVpnRegions.length > 0 ? piaOpenVpnRegions.map(region => {
                               const isSelected = piaOpenVpnRegionsList.includes(region);
@@ -760,9 +851,9 @@ export default function Settings() {
                                 }} style={{
                                   padding: '5px 12px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
                                   display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
-                                  background: isSelected ? 'var(--success)' : 'rgba(255,255,255,0.05)',
+                                  background: isSelected ? 'var(--success)' : 'var(--surface-1)',
                                   color: isSelected ? '#fff' : 'var(--text-secondary)',
-                                  border: `1px solid ${isSelected ? 'var(--success)' : 'rgba(255,255,255,0.1)'}`
+                                  border: `1px solid ${isSelected ? 'var(--success)' : 'var(--glass-border)'}`
                                 }}>
                                   {region}
                                   {isSelected && <span className="material-icons-round" style={{ fontSize: '12px' }}>check</span>}
@@ -770,7 +861,7 @@ export default function Settings() {
                               );
                             }) : (
                               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
-                                Click "Fetch Regions" to load available PIA OpenVPN regions...
+                                Loading server list… use &quot;Fetch server list&quot; if nothing appears.
                               </div>
                             )}
                           </div>
@@ -1123,7 +1214,7 @@ export default function Settings() {
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px', marginTop: '16px' }}>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>DNS Caching</strong>
                     <span>Cache DNS queries internally</span>
@@ -1133,7 +1224,7 @@ export default function Settings() {
                     <span className="slider"></span>
                   </label>
                 </div>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>IPv6 DNS</strong>
                     <span>Enable DNS IPv6 resolution</span>
@@ -1143,7 +1234,7 @@ export default function Settings() {
                     <span className="slider"></span>
                   </label>
                 </div>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>Public IP Check</strong>
                     <span>Log public IP on connect</span>
@@ -1277,7 +1368,7 @@ export default function Settings() {
                 </p>
               </div>
 
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                 <div className="toggle-info">
                   <strong style={{ fontSize: '16px' }}>Enable Port Forwarding</strong>
                   <span style={{ color: 'var(--text-secondary)' }}>Request and maintain an open port on the VPN server</span>
@@ -1340,7 +1431,7 @@ export default function Settings() {
                 Shadowsocks Proxy
               </h3>
 
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginBottom: '16px' }}>
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
                 <div className="toggle-info">
                   <strong style={{ fontSize: '16px' }}>Enable Shadowsocks Server</strong>
                   <span style={{ color: 'var(--text-secondary)' }}>Runs a lightweight, undetectable proxy on port 8388</span>
@@ -1389,7 +1480,7 @@ export default function Settings() {
                 HTTP Proxy
               </h3>
 
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginBottom: '16px' }}>
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
                 <div className="toggle-info">
                   <strong style={{ fontSize: '16px' }}>Enable HTTP Proxy Server</strong>
                   <span style={{ color: 'var(--text-secondary)' }}>Runs a standard HTTP proxy on port 8888</span>
@@ -1417,7 +1508,7 @@ export default function Settings() {
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '16px' }}>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>Stealth Mode</strong>
                     <span>Strip proxy headers from requests</span>
@@ -1427,7 +1518,7 @@ export default function Settings() {
                     <span className="slider"></span>
                   </label>
                 </div>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px' }}>
+                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>Tracing Log</strong>
                     <span>Log every tunnel request</span>
@@ -1451,6 +1542,41 @@ export default function Settings() {
               </div>
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>admin_panel_settings</span>
+                GUI Security
+              </h3>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="form-group">
+                  <label>New GUI Password</label>
+                  <input
+                    type="password"
+                    value={guiPasswordNew}
+                    onChange={e => setGuiPasswordNew(e.target.value)}
+                    className="text-input"
+                    placeholder="Enter a new password"
+                    autoComplete="new-password"
+                  />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    Leave blank to keep your current password.
+                  </p>
+                </div>
+                <div className="form-group">
+                  <label>Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={guiPasswordConfirm}
+                    onChange={e => setGuiPasswordConfirm(e.target.value)}
+                    className="text-input"
+                    placeholder="Re-enter the new password"
+                    autoComplete="new-password"
+                  />
+                </div>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>bug_report</span>
                 Logging & Debugging
               </h3>
@@ -1468,11 +1594,78 @@ export default function Settings() {
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>notifications</span>
+                Notifications
+              </h3>
+
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '12px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '16px' }}>Enable Notifications</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Controls the in-app notification center</span>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={notifyPrefs?.enabled !== false}
+                    onChange={(e) => setNotifyPrefs(p => ({ ...p, enabled: e.target.checked }))}
+                  />
+                  <span className="slider"></span>
+                </label>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
+                <div className="glass-panel" style={{ padding: '16px' }}>
+                  <strong style={{ display: 'block', marginBottom: '10px' }}>Sources</strong>
+                  {['settings', 'dashboard', 'monitor', 'logs'].map(src => (
+                    <div key={src} className="toggle-switch-container" style={{ padding: '10px 0', borderBottom: '1px solid var(--glass-border)' }}>
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '14px' }}>{src}</strong>
+                        <span>Show notifications from {src}</span>
+                      </div>
+                      <label className="switch">
+                        <input
+                          type="checkbox"
+                          checked={notifyPrefs?.sources?.[src] !== false}
+                          onChange={(e) => setNotifyPrefs(p => ({ ...p, sources: { ...(p.sources || {}), [src]: e.target.checked } }))}
+                        />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="glass-panel" style={{ padding: '16px' }}>
+                  <strong style={{ display: 'block', marginBottom: '10px' }}>Toast popups</strong>
+                  {['success', 'error', 'warning', 'info'].map(level => (
+                    <div key={level} className="toggle-switch-container" style={{ padding: '10px 0', borderBottom: '1px solid var(--glass-border)' }}>
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '14px' }}>{level}</strong>
+                        <span>Show toast popup for {level}</span>
+                      </div>
+                      <label className="switch">
+                        <input
+                          type="checkbox"
+                          checked={!!notifyPrefs?.toasts?.[level]}
+                          onChange={(e) => setNotifyPrefs(p => ({ ...p, toasts: { ...(p.toasts || {}), [level]: e.target.checked } }))}
+                        />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+                  ))}
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '10px' }}>
+                    Tip: keep warnings in the bell, and reserve toasts for errors/success.
+                  </p>
+                </div>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>monitor_heart</span>
                 Health Check
               </h3>
 
-              <div className="toggle-switch-container" style={{ padding: '16px', background: 'rgba(0,0,0,0.2)', borderRadius: '12px', marginBottom: '16px' }}>
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
                 <div className="toggle-info">
                   <strong style={{ fontSize: '16px' }}>Auto-Restart VPN on Failure</strong>
                   <span style={{ color: 'var(--text-secondary)' }}>Automatically restart VPN if health check fails (recommended)</span>
@@ -1596,7 +1789,7 @@ export default function Settings() {
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
-                  Shell commands executed when VPN connects/disconnects. Use <code style={{ background: 'rgba(0,0,0,0.3)', padding: '2px 6px', borderRadius: '4px' }}>{'{{VPN_INTERFACE}}'}</code> as a template variable.
+                  Shell commands executed when VPN connects/disconnects. Use <code style={{ background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>{'{{VPN_INTERFACE}}'}</code> as a template variable.
                 </p>
               </div>
 

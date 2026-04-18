@@ -134,10 +134,17 @@ async function updateCurrentSession(networks) {
     if (!currentSession.publicIp || !currentSession.serverIp || currentSession.location === 'auto') {
         try {
             const containers = await docker.listContainers({ all: true });
-            const gluetun = containers.find(c => c.Names.some(n => n.includes('gluetun')));
+            const gluetun = findGluetunEngineContainer(containers);
             if (gluetun) {
-                const logsStream = await docker.getContainer(gluetun.Id).logs({ follow: false, stdout: true, stderr: true, tail: 300 });
-                const logs = logsStream.toString('utf8');
+                let logs = '';
+                try {
+                    const logsStream = await docker.getContainer(gluetun.Id).logs({ follow: false, stdout: true, stderr: true, tail: 300 });
+                    logs = logsStream.toString('utf8');
+                } catch (e) {
+                    // Container can be recreated between list and logs; ignore expected 404 race.
+                    if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
+                    throw e;
+                }
                 
                 const serverMatches = logs.match(/Connecting to ([\d\.]+)/g);
                 if (serverMatches) {
@@ -156,6 +163,7 @@ async function updateCurrentSession(networks) {
                 }
             }
         } catch (e) {
+            if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
             console.error('[Sessions] Error parsing gluetun logs:', e.message);
         }
     }
@@ -173,6 +181,14 @@ loadSessions();
 
 // Initialize Docker instance
 const docker = new Docker();
+
+function findGluetunEngineContainer(containers) {
+    // Prefer exact compose name `/gluetun`, otherwise fall back to "gluetun but not gui"
+    return (
+        containers.find(c => (c.Names || []).some(n => n === '/gluetun')) ||
+        containers.find(c => (c.Names || []).some(n => n.includes('gluetun') && !n.includes('gui')))
+    );
+}
 
 // Authentication Middleware
 const authenticateToken = (req, res, next) => {
@@ -1141,9 +1157,10 @@ async function executeFailoverRotation() {
     const vpnType = (env.VPN_TYPE || 'wireguard').toLowerCase();
 
     const wgRegions = (env.PIA_WG_REGIONS || env.PIA_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
-    const ovRegions = (env.PIA_OPENVPN_REGIONS || env.PIA_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
+    // OpenVPN must use PIA_OPENVPN_REGIONS only — PIA_REGIONS often holds WireGuard ids (e.g. montreal427 vs montreal420)
+    const ovRegions = (env.PIA_OPENVPN_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
     const regions = vpnType === 'openvpn'
-        ? (ovRegions.length ? ovRegions : wgRegions)
+        ? ovRegions
         : (wgRegions.length ? wgRegions : ovRegions);
 
     if (!regions.length) {

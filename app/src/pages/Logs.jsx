@@ -1,6 +1,8 @@
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useEffect, useState, useRef, useMemo, useCallback } from 'react';
+import { useNotifications } from '../contexts/NotificationsContext';
 
 export default function Logs() {
+  const { notify } = useNotifications();
   const [logs, setLogs] = useState([]);
   const [filter, setFilter] = useState('');
   const [wordWrap, setWordWrap] = useState(true);
@@ -11,8 +13,31 @@ export default function Logs() {
   const isPausedRef = useRef(isPaused);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
+  const logAlertRef = useRef({ lastAt: 0, lastSnippet: '' });
 
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+
+  const maybeNotifyLogAlert = useCallback((line) => {
+    if (!line || typeof line !== 'string') return;
+    const isError = /\b(ERROR|FATAL|CRITICAL|PANIC)\b/i.test(line);
+    const isWarn = /\b(WARN|WARNING)\b/i.test(line);
+    if (!isError && !isWarn) return;
+    const now = Date.now();
+    const snippet = line.replace(/\s+/g, ' ').trim().slice(0, 160);
+    const { lastAt, lastSnippet } = logAlertRef.current;
+    // Throttle similar lines and overall rate
+    if (now - lastAt < 5000 && snippet.slice(0, 80) === lastSnippet.slice(0, 80)) return;
+    if (now - lastAt < 2000) return;
+    logAlertRef.current = { lastAt: now, lastSnippet: snippet };
+
+    notify({
+      level: isError ? 'error' : 'warning',
+      title: isError ? 'Log: error' : 'Log: warning',
+      message: snippet,
+      source: 'logs',
+      dedupeKey: `log:${snippet.slice(0, 96)}`,
+    });
+  }, [notify]);
 
   useEffect(() => {
     // Fetch initial log level
@@ -31,6 +56,7 @@ export default function Logs() {
       try {
         let line = JSON.parse(event.data);
         if (line && line.trim() !== '') {
+          maybeNotifyLogAlert(line);
           setLogs((prev) => {
             const newLogs = [...prev, line];
             if (newLogs.length > 2000) return newLogs.slice(newLogs.length - 2000);
@@ -43,7 +69,7 @@ export default function Logs() {
     };
 
     return () => eventSource.close();
-  }, []);
+  }, [maybeNotifyLogAlert]);
 
   useEffect(() => {
     if (autoScroll && logsContainerRef.current) {
@@ -93,7 +119,7 @@ export default function Logs() {
         </div>
         
         <div className="toggle-switch-container" style={{
-          background: 'rgba(0,0,0,0.2)', padding: '12px 20px', borderRadius: '12px', border: '1px solid var(--glass-border)', margin: 0, width: 'auto'
+          background: 'var(--surface-2)', padding: '12px 20px', borderRadius: '12px', border: '1px solid var(--glass-border)', margin: 0, width: 'auto'
         }}>
           <div className="toggle-info" style={{ marginRight: '16px' }}>
             <strong style={{ fontSize: '14px', color: logLevel === 'debug' ? 'var(--accent-primary)' : 'inherit', marginLeft: '4px' }}>
@@ -127,8 +153,8 @@ export default function Logs() {
             onChange={(e) => setFilter(e.target.value)}
             style={{ 
               width: '100%', padding: '10px 12px 10px 42px', borderRadius: '8px', 
-              border: '1px solid rgba(255,255,255,0.1)', background: 'rgba(0,0,0,0.3)', 
-              color: '#fff', outline: 'none', fontSize: '14px' 
+              border: '1px solid var(--glass-border)', background: 'var(--input-bg)', 
+              color: 'var(--text-primary)', outline: 'none', fontSize: '14px' 
             }}
           />
         </div>
@@ -156,16 +182,16 @@ export default function Logs() {
         minHeight: 0,
         display: 'flex',
         flexDirection: 'column',
-        background: '#0d1117',
-        border: '1px solid rgba(255, 255, 255, 0.15)',
+        background: 'var(--mono-bg)',
+        border: '1px solid var(--glass-border)',
         overflow: 'hidden',
         boxShadow: 'inset 0 0 20px rgba(0,0,0,0.5)',
         borderRadius: '12px'
       }}>
         <div style={{
           padding: '12px 20px',
-          background: '#161b22',
-          borderBottom: '1px solid #30363d',
+          background: 'var(--mono-panel)',
+          borderBottom: '1px solid var(--glass-border)',
           display: 'flex',
           gap: '8px'
         }}>
@@ -181,10 +207,10 @@ export default function Logs() {
           fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
           fontSize: '13px',
           lineHeight: '1.6',
-          color: '#c9d1d9'
+          color: 'var(--mono-text)'
         }}>
           {filteredLogs.map((log, index) => {
-            let color = '#c9d1d9';
+            let color = 'var(--mono-text)';
             const text = log.toLowerCase();
             if (text.includes('fatal') || text.includes('panic')) color = '#ff7b72'; 
             else if (text.includes('error')) color = '#f85149';

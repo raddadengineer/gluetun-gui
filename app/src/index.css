@@ -16,6 +16,14 @@
   --text-grad-2: #a0a5b5;
   --sidebar-bg: rgba(13, 15, 20, 0.6);
   --input-bg: rgba(0, 0, 0, 0.2);
+  --overlay-bg: rgba(12, 18, 28, 0.92);
+  --surface-1: rgba(255, 255, 255, 0.03);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-3: rgba(255, 255, 255, 0.10);
+  --code-bg: rgba(0, 0, 0, 0.35);
+  --mono-bg: rgba(13, 17, 23, 0.96);
+  --mono-panel: rgba(22, 27, 34, 0.96);
+  --mono-text: #c9d1d9;
 }
 
 :root[data-theme='light'] {
@@ -32,6 +40,92 @@
   --text-grad-2: #334155;
   --sidebar-bg: rgba(255, 255, 255, 0.5);
   --input-bg: rgba(255, 255, 255, 0.8);
+  --overlay-bg: rgba(255, 255, 255, 0.94);
+  --surface-1: rgba(0, 0, 0, 0.03);
+  --surface-2: rgba(0, 0, 0, 0.06);
+  --surface-3: rgba(0, 0, 0, 0.10);
+  --code-bg: rgba(15, 23, 42, 0.10);
+  --mono-bg: rgba(15, 23, 42, 0.94);
+  --mono-panel: rgba(30, 41, 59, 0.94);
+  --mono-text: #e5e7eb;
+}
+
+:root[data-theme='midnight'] {
+  --bg-color: #070a12;
+  --bg-gradient: radial-gradient(circle at top right, #0b1b3b, #070a12);
+  --glass-bg: rgba(255, 255, 255, 0.035);
+  --glass-border: rgba(255, 255, 255, 0.09);
+  --glass-highlight: rgba(255, 255, 255, 0.16);
+  --text-primary: #eef2ff;
+  --text-secondary: #93a3bf;
+  --accent-primary: #60a5fa;
+  --accent-glow: rgba(96, 165, 250, 0.25);
+  --success: #22c55e;
+  --danger: #f43f5e;
+  --text-grad-1: #ffffff;
+  --text-grad-2: #9aa6bf;
+  --sidebar-bg: rgba(6, 10, 18, 0.72);
+  --input-bg: rgba(0, 0, 0, 0.25);
+  --overlay-bg: rgba(6, 10, 18, 0.94);
+  --surface-1: rgba(255, 255, 255, 0.04);
+  --surface-2: rgba(255, 255, 255, 0.07);
+  --surface-3: rgba(255, 255, 255, 0.11);
+  --code-bg: rgba(0, 0, 0, 0.35);
+  --mono-bg: rgba(7, 10, 18, 0.97);
+  --mono-panel: rgba(11, 17, 32, 0.97);
+  --mono-text: #dbeafe;
+}
+
+:root[data-theme='slate'] {
+  --bg-color: #0b1220;
+  --bg-gradient: radial-gradient(circle at top right, #1f2937, #0b1220);
+  --glass-bg: rgba(255, 255, 255, 0.05);
+  --glass-border: rgba(255, 255, 255, 0.10);
+  --glass-highlight: rgba(255, 255, 255, 0.18);
+  --text-primary: #f8fafc;
+  --text-secondary: #a7b0c0;
+  --accent-primary: #22c55e;
+  --accent-glow: rgba(34, 197, 94, 0.22);
+  --success: #22c55e;
+  --danger: #ef4444;
+  --text-grad-1: #ffffff;
+  --text-grad-2: #b8c0cf;
+  --sidebar-bg: rgba(11, 18, 32, 0.72);
+  --input-bg: rgba(0, 0, 0, 0.22);
+  --overlay-bg: rgba(11, 18, 32, 0.94);
+  --surface-1: rgba(255, 255, 255, 0.05);
+  --surface-2: rgba(255, 255, 255, 0.08);
+  --surface-3: rgba(255, 255, 255, 0.12);
+  --code-bg: rgba(0, 0, 0, 0.30);
+  --mono-bg: rgba(11, 18, 32, 0.97);
+  --mono-panel: rgba(17, 24, 39, 0.97);
+  --mono-text: #e5e7eb;
+}
+
+:root[data-theme='high-contrast'] {
+  --bg-color: #000000;
+  --bg-gradient: radial-gradient(circle at top right, #111111, #000000);
+  --glass-bg: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.22);
+  --glass-highlight: rgba(255, 255, 255, 0.35);
+  --text-primary: #ffffff;
+  --text-secondary: #d1d5db;
+  --accent-primary: #fbbf24;
+  --accent-glow: rgba(251, 191, 36, 0.25);
+  --success: #22c55e;
+  --danger: #ef4444;
+  --text-grad-1: #ffffff;
+  --text-grad-2: #e5e7eb;
+  --sidebar-bg: rgba(0, 0, 0, 0.85);
+  --input-bg: rgba(255, 255, 255, 0.12);
+  --overlay-bg: rgba(0, 0, 0, 0.94);
+  --surface-1: rgba(255, 255, 255, 0.10);
+  --surface-2: rgba(255, 255, 255, 0.14);
+  --surface-3: rgba(255, 255, 255, 0.20);
+  --code-bg: rgba(255, 255, 255, 0.16);
+  --mono-bg: rgba(0, 0, 0, 0.98);
+  --mono-panel: rgba(17, 17, 17, 0.98);
+  --mono-text: #ffffff;
 }
 
 * {
@@ -552,6 +646,44 @@ input:checked+.slider:before {
 
 .toast-error .material-icons-round {
   color: var(--danger);
+}
+
+/* Notifications panel */
+.notif-panel {
+  position: absolute;
+  left: calc(100% + 12px);
+  bottom: 0;
+  width: 360px;
+  max-height: 520px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--overlay-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--glass-border);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  z-index: 9998;
+}
+
+.notif-item {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.notif-item:hover {
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.18);
 }
 
 @keyframes slideIn {

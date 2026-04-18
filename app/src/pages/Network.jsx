@@ -21,10 +21,10 @@ const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div style={{
-      background: 'rgba(10,12,18,0.96)', border: '1px solid rgba(255,255,255,0.1)',
+      background: 'var(--overlay-bg)', border: '1px solid var(--glass-border)',
       borderRadius: '10px', padding: '12px 16px', boxShadow: '0 8px 32px rgba(0,0,0,0.6)'
     }}>
-      <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: '11px', marginBottom: '8px' }}>{label}</p>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '11px', marginBottom: '8px' }}>{label}</p>
       {payload.map((p, i) => (
         <p key={i} style={{ color: p.color, fontSize: '13px', fontWeight: 600, marginBottom: '3px' }}>
           {p.name}: {formatBytes(p.value * 1024)}
@@ -295,7 +295,7 @@ export default function Network() {
                       { label: 'Download', value: formatBps(s.rx), total: formatBytes(net.rx_bytes), pk: formatBps(p.rx), color: '#3b82f6', icon: 'arrow_downward' },
                       { label: 'Upload',   value: formatBps(s.tx), total: formatBytes(net.tx_bytes), pk: formatBps(p.tx), color: '#f59e0b', icon: 'arrow_upward'   },
                     ].map(row => (
-                      <div key={row.label} style={{ padding: '12px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)' }}>
+                      <div key={row.label} style={{ padding: '12px', borderRadius: '8px', background: 'var(--surface-2)', border: '1px solid var(--glass-border)' }}>
                         <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                           <span className="material-icons-round" style={{ fontSize: '14px', color: row.color }}>{row.icon}</span>{row.label}
                         </p>
@@ -312,7 +312,7 @@ export default function Network() {
                       <span style={{ color: '#3b82f6' }}>↓ {rxPct.toFixed(0)}% RX</span>
                       <span style={{ color: '#f59e0b' }}>TX {(100 - rxPct).toFixed(0)}% ↑</span>
                     </div>
-                    <div style={{ height: '5px', borderRadius: '3px', background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                    <div style={{ height: '5px', borderRadius: '3px', background: 'var(--surface-2)', overflow: 'hidden', border: '1px solid var(--glass-border)' }}>
                       <div style={{ height: '100%', width: `${rxPct}%`, background: `linear-gradient(90deg, #3b82f6, ${meta.color})`, borderRadius: '3px', transition: 'width 0.5s ease' }} />
                     </div>
                   </div>
@@ -417,7 +417,7 @@ export default function Network() {
                           { label: 'LAN ↑',        value: formatBytes(lan.tx), icon: 'arrow_upward',   color: '#a5b4fc' },
                           { label: 'Total',         value: formatBytes(totalRx + totalTx), icon: 'data_usage', color: 'var(--accent-primary)' },
                         ].map(({ label, value, icon, color }) => (
-                          <div key={label} style={{ padding: '10px 14px', borderRadius: '8px', background: 'rgba(0,0,0,0.2)' }}>
+                          <div key={label} style={{ padding: '10px 14px', borderRadius: '8px', background: 'var(--surface-2)', border: '1px solid var(--glass-border)' }}>
                             <p style={{ fontSize: '10px', color: 'var(--text-secondary)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
                               <span className="material-icons-round" style={{ fontSize: '12px', color }}>{icon}</span>
                               {label}
