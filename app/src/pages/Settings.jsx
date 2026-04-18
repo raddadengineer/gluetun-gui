@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 export default function Settings() {
   const [config, setConfig] = useState({});
@@ -43,7 +43,7 @@ export default function Settings() {
             setPiaOpenVpnRegionsList([data.PIA_REGION]);
           }
         }
-        if (data.PIA_PORT_FORWARDING === 'true') setPiaPortForwarding(true);
+        if (data.PIA_PORT_FORWARDING === 'true' || data.PIA_PORT_FORWARDING === 'on') setPiaPortForwarding(true);
       })
       .catch(console.error);
 
@@ -61,21 +61,79 @@ export default function Settings() {
     // Initial monitoring fetch
     const fetchMonitoring = () => {
       fetch('/api/pia/monitoring', { headers: { 'Authorization': `Bearer ${token}` } })
-        .then(r => r.json())
-        .then(data => setPiaMonitoring(data))
-        .catch(console.error);
+        .then(async (r) => {
+          if (!r.ok) throw new Error(`Monitoring request failed: ${r.status}`);
+          return r.json();
+        })
+        .then(data => {
+          const safe = {
+            failCount: Number.isFinite(Number(data?.failCount)) ? Number(data.failCount) : 0,
+            pfFailCount: Number.isFinite(Number(data?.pfFailCount)) ? Number(data.pfFailCount) : 0,
+            lastForwardedPort: data?.lastForwardedPort ?? null,
+            checkInterval: Number.isFinite(Number(data?.checkInterval)) ? Number(data.checkInterval) : 30 * 1000,
+          };
+          setPiaMonitoring(safe);
+        })
+        .catch((err) => {
+          console.error(err);
+          // Avoid breaking UI with undefined/NaN values on auth/server errors
+          setPiaMonitoring({
+            failCount: 0,
+            pfFailCount: 0,
+            lastForwardedPort: null,
+            checkInterval: 30 * 1000,
+          });
+        });
     };
     fetchMonitoring();
     const monitorInterval = setInterval(fetchMonitoring, 30000);
     return () => clearInterval(monitorInterval);
   }, []);
 
-  const fetchPiaRegions = () => {
-    fetch('/api/pia/regions')
-      .then(r => r.json())
-      .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
-      .catch(console.error);
+  const fetchPiaRegions = async () => {
+    try {
+      const res = await fetch('/api/pia/regions');
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to fetch PIA regions (${res.status})${text ? `: ${text}` : ''}`);
+      }
+      const regions = await res.json();
+      if (!Array.isArray(regions)) {
+        throw new Error('Failed to fetch PIA regions: unexpected response');
+      }
+      setPiaRegions(regions);
+    } catch (e) {
+      console.error(e);
+      setMessage({ type: 'error', text: e.message || 'Failed to fetch PIA regions.' });
+      setTimeout(() => setMessage(null), 4000);
+    }
   };
+
+  // When PF is enabled, limit WG region selection to PF-capable regions
+  useEffect(() => {
+    if (!piaPortForwarding) return;
+    if (!Array.isArray(piaRegions) || piaRegions.length === 0) return;
+    const pfIds = new Set(piaRegions.filter(r => r?.portForward).map(r => r.id));
+    setPiaWgRegionsList(prev => prev.filter(id => pfIds.has(id)));
+  }, [piaPortForwarding, piaRegions]);
+
+  const displayPiaRegions = useMemo(() => {
+    const list = Array.isArray(piaRegions) ? piaRegions : [];
+    return piaPortForwarding ? list.filter(r => r?.portForward) : list;
+  }, [piaPortForwarding, piaRegions]);
+
+  const piaRegionNameById = useMemo(() => {
+    const map = new Map();
+    (Array.isArray(piaRegions) ? piaRegions : []).forEach(r => {
+      if (r?.id) map.set(r.id, r.name || r.id);
+    });
+    return map;
+  }, [piaRegions]);
+
+  const wgFailoverOrderLabel = useMemo(() => {
+    if (!piaWgRegionsList.length) return 'None selected';
+    return piaWgRegionsList.map(id => piaRegionNameById.get(id) || id).join(' ➜ ');
+  }, [piaRegionNameById, piaWgRegionsList]);
 
   const fetchPiaOpenVpnRegions = async () => {
     try {
@@ -214,11 +272,39 @@ export default function Settings() {
     );
   };
 
+  const buildSaveData = (baseConfig) => {
+    const activePiaRegions = ((baseConfig?.VPN_TYPE || config.VPN_TYPE) === 'openvpn')
+      ? piaOpenVpnRegionsList.join(',')
+      : piaWgRegionsList.join(',');
+    return {
+      ...(baseConfig || config),
+      PIA_REGIONS: activePiaRegions,
+      PIA_WG_REGIONS: piaWgRegionsList.join(','),
+      PIA_OPENVPN_REGIONS: piaOpenVpnRegionsList.join(','),
+      PIA_PORT_FORWARDING: piaPortForwarding ? 'true' : 'false',
+      // Always persist credentials when present (Generate uses them anyway)
+      PIA_USERNAME: piaUsername,
+      PIA_PASSWORD: piaPassword,
+    };
+  };
+
   const handlePiaGenerate = async () => {
     setPiaGenerating(true);
     setMessage(null);
     try {
       const token = localStorage.getItem('token');
+
+      // Save all settings first so Generate/Connect is always consistent.
+      const saveRes = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(buildSaveData()),
+      });
+      if (!saveRes.ok) {
+        const errData = await saveRes.json().catch(() => ({}));
+        throw new Error(errData.error || `Failed to save settings (${saveRes.status})`);
+      }
+
       const res = await fetch('/api/pia/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
@@ -297,13 +383,7 @@ export default function Settings() {
     setSaving(true);
     try {
       const token = localStorage.getItem('token');
-      const activePiaRegions = (config.VPN_TYPE === 'openvpn') ? piaOpenVpnRegionsList.join(',') : piaWgRegionsList.join(',');
-      const saveData = { 
-        ...config, 
-        PIA_REGIONS: activePiaRegions,
-        PIA_WG_REGIONS: piaWgRegionsList.join(','),
-        PIA_OPENVPN_REGIONS: piaOpenVpnRegionsList.join(',')
-      };
+      const saveData = buildSaveData();
       const res = await fetch('/api/config', {
         method: 'POST',
         headers: {
@@ -461,7 +541,7 @@ export default function Settings() {
                                   </span>
                                   <span style={{ color: 'var(--text-secondary)' }}>
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
-                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.lastForwardedPort || 'Pending'})</strong>
+                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
                                       <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
                                     )}
@@ -507,12 +587,14 @@ export default function Settings() {
                         </div>
                         <div style={{ padding: '12px', background: 'rgba(0,0,0,0.2)', borderRadius: '10px', border: '1px solid var(--glass-border)' }}>
                           <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', maxHeight: '180px', overflowY: 'auto', padding: '4px' }}>
-                            {piaRegions.length > 0 ? piaRegions.map(r => {
+                            {displayPiaRegions.length > 0 ? displayPiaRegions.map(r => {
                               const isSelected = piaWgRegionsList.includes(r.id);
                               return (
                                 <div key={r.id} onClick={() => {
-                                  if (isSelected) setPiaWgRegionsList(piaWgRegionsList.filter(x => x !== r.id));
-                                  else setPiaWgRegionsList([...piaWgRegionsList, r.id]);
+                                  setPiaWgRegionsList(prev => {
+                                    if (prev.includes(r.id)) return prev.filter(x => x !== r.id);
+                                    return [...prev, r.id];
+                                  });
                                 }} style={{
                                   padding: '5px 11px', borderRadius: '16px', fontSize: '12px', cursor: 'pointer',
                                   display: 'flex', alignItems: 'center', gap: '5px', transition: 'all 0.2s',
@@ -527,12 +609,12 @@ export default function Settings() {
                               );
                             }) : (
                               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
-                                Click "Refresh" to load regions from PIA...
+                                {piaPortForwarding ? 'No port-forwarding regions available yet. Click \"Refresh\".' : 'Click \"Refresh\" to load regions from PIA...'}
                               </div>
                             )}
                           </div>
                           <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
-                            Failover order: <strong style={{ color: 'var(--accent-primary)' }}>{piaWgRegionsList.join(' ➜ ') || 'None selected'}</strong>
+                            Failover order: <strong style={{ color: 'var(--accent-primary)' }}>{wgFailoverOrderLabel}</strong>
                           </p>
                         </div>
                       </div>
@@ -554,7 +636,15 @@ export default function Settings() {
                           <span>Only use PIA servers that support port forwarding</span>
                         </div>
                         <label className="switch">
-                          <input type="checkbox" checked={piaPortForwarding} onChange={e => setPiaPortForwarding(e.target.checked)} />
+                          <input
+                            type="checkbox"
+                            checked={piaPortForwarding}
+                            onChange={e => {
+                              const on = e.target.checked;
+                              setPiaPortForwarding(on);
+                              setConfig(c => ({ ...c, PIA_PORT_FORWARDING: on ? 'true' : 'false' }));
+                            }}
+                          />
                           <span className="slider"></span>
                         </label>
                       </div>
@@ -613,7 +703,7 @@ export default function Settings() {
                                   </span>
                                   <span style={{ color: 'var(--text-secondary)' }}>
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
-                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.lastForwardedPort || 'Pending'})</strong>
+                                      <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
                                       <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
                                     )}

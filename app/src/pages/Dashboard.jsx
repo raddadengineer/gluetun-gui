@@ -8,6 +8,7 @@ export default function Dashboard() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [prevNet, setPrevNet] = useState({ rx: 0, tx: 0, time: Date.now() });
   const [netHistory, setNetHistory] = useState([]);
@@ -116,14 +117,31 @@ export default function Dashboard() {
     }
   };
 
+  const fetchPiaMonitoring = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/pia/monitoring', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      setPiaMonitoring(data);
+    } catch {
+      // silent
+    }
+  };
+
   useEffect(() => {
     fetchStatus();
     fetchMetrics();
+    fetchPiaMonitoring();
     const statusInterval = setInterval(fetchStatus, 3000);
     const metricsInterval = setInterval(fetchMetrics, 1500);
+    const piaMonInterval = setInterval(fetchPiaMonitoring, 10000);
     return () => {
       clearInterval(statusInterval);
       clearInterval(metricsInterval);
+      clearInterval(piaMonInterval);
     };
   }, []);
 
@@ -250,7 +268,7 @@ export default function Dashboard() {
           </div>
 
           <div className="status-info">
-            <h3>{status?.parsedEnv?.VPN_SERVICE_PROVIDER || 'Mullvad'}</h3>
+            <h3>{status?.displayProvider || status?.gui?.VPN_SERVICE_PROVIDER || status?.parsedEnv?.VPN_SERVICE_PROVIDER || (loading ? 'Loading…' : 'Unknown')}</h3>
             {status?.currentSession?.publicIp ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', margin: '6px 0 8px 0' }}>
                 <span style={{ fontSize: '14px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
@@ -272,6 +290,13 @@ export default function Dashboard() {
               <span className="material-icons-round" style={{ fontSize: '14px' }}>schedule</span>
               {status?.startedAt ? `Connected ${formatDistanceToNow(new Date(status.startedAt))} ago` : 'Uptime Unknown'}
             </p>
+
+            {piaMonitoring?.portForwarding && (
+              <p style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                <span className="material-icons-round" style={{ fontSize: '14px', color: 'var(--success)' }}>hub</span>
+                Port Forwarding: <strong style={{ color: 'var(--success)' }}>{piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'}</strong>
+              </p>
+            )}
           </div>
         </div>
 

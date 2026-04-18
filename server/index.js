@@ -241,13 +241,23 @@ app.get('/api/status', authenticateToken, async (req, res) => {
             startNewSession(containerInfo.Id, containerInfo.State.StartedAt, envVars);
         }
 
+        const guiEnv = readGuiEnv();
+        // Prefer GUI-selected provider label for display (e.g. PIA WireGuard uses VPN_SERVICE_PROVIDER=custom in container)
+        const displayProvider = guiEnv.VPN_SERVICE_PROVIDER || null;
+
         res.json({
             status: containerInfo.State.Status,
             id: containerInfo.Id,
             env: containerInfo.Config.Env,
             image: containerInfo.Config.Image,
             startedAt: containerInfo.State.StartedAt,
-            currentSession
+            currentSession,
+            gui: {
+                VPN_SERVICE_PROVIDER: guiEnv.VPN_SERVICE_PROVIDER || null,
+                VPN_TYPE: guiEnv.VPN_TYPE || null,
+                PIA_PORT_FORWARDING: guiEnv.PIA_PORT_FORWARDING || null,
+            },
+            displayProvider
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -629,10 +639,34 @@ app.post('/api/config', authenticateToken, async (req, res) => {
             Object.keys(gluetunEnv).forEach(k => {
                 if (k.startsWith('OPENVPN_')) delete gluetunEnv[k];
             });
+            
+            // For custom WireGuard, Gluetun requires explicit port forwarding API credentials
+            // Use gluetunEnv: UI 'true'/'false' was already mapped to 'on'/'off' above
+            if (gluetunEnv.PIA_PORT_FORWARDING === 'on' || gluetunEnv.VPN_PORT_FORWARDING === 'on') {
+                const apiUser = config.PIA_USERNAME || config.OPENVPN_USER;
+                const apiPass = config.PIA_PASSWORD || config.OPENVPN_PASSWORD;
+                if (apiUser && apiPass) {
+                    gluetunEnv.VPN_PORT_FORWARDING_PROVIDER = 'private internet access';
+                    gluetunEnv.VPN_PORT_FORWARDING_USERNAME = apiUser;
+                    gluetunEnv.VPN_PORT_FORWARDING_PASSWORD = apiPass;
+                }
+            }
         } else if (gluetunEnv.VPN_TYPE === 'openvpn') {
             Object.keys(gluetunEnv).forEach(k => {
                 if (k.startsWith('WIREGUARD_')) delete gluetunEnv[k];
             });
+            
+            // Map the selected PIA OpenVPN region to SERVER_REGIONS for Gluetun
+            if (gluetunEnv.VPN_SERVICE_PROVIDER === 'private internet access' && config.PIA_OPENVPN_REGIONS) {
+                const regions = config.PIA_OPENVPN_REGIONS.split(',').map(s => s.trim()).filter(Boolean);
+                let activeIndex = parseInt(config.PIA_REGION_INDEX || '0', 10);
+                if (isNaN(activeIndex) || activeIndex < 0 || activeIndex >= regions.length) activeIndex = 0;
+                
+                if (regions.length > 0) {
+                    gluetunEnv.SERVER_REGIONS = regions[activeIndex];
+                    console.log(`[Config] Injected SERVER_REGIONS=${gluetunEnv.SERVER_REGIONS} from PIA_OPENVPN_REGIONS index ${activeIndex}`);
+                }
+            }
         }
 
         // Recreate the container to apply changes immediately
@@ -754,6 +788,208 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
     }
 });
 
+// ── GUI .env helpers (PIA failover / rotation) ───────────────────────────────
+function readGuiEnv() {
+    const o = {};
+    if (!fs.existsSync(ENV_PATH)) return o;
+    fs.readFileSync(ENV_PATH, 'utf8').split('\n').forEach(line => {
+        if (line && line.includes('=')) {
+            const parts = line.split('=');
+            o[parts[0]] = parts.slice(1).join('=').trim();
+        }
+    });
+    return o;
+}
+
+function writeGuiEnv(obj) {
+    let s = '';
+    for (const [k, v] of Object.entries(obj)) {
+        if (v !== undefined && v !== null && v.toString().trim() !== '') s += `${k}=${v}\n`;
+    }
+    fs.writeFileSync(ENV_PATH, s, 'utf8');
+}
+
+/**
+ * Run pia-wg-config, write Gluetun env + GUI .env, recreate Gluetun container.
+ * @param {string} opts.PIA_REGION — region id passed to pia-wg-config -r
+ */
+async function applyPiaWireguardFromCredentials({
+    PIA_USERNAME,
+    PIA_PASSWORD,
+    PIA_REGION,
+    PIA_PORT_FORWARDING = 'false',
+    PIA_REGIONS,
+    PIA_REGION_INDEX = '0',
+}) {
+    const pfFlag = PIA_PORT_FORWARDING === 'true' || PIA_PORT_FORWARDING === 'on' ? ' -p' : '';
+    const safeRegion = PIA_REGION.replace(/[^a-zA-Z0-9_-]/g, '');
+    const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
+    const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
+
+    console.log('[PIA-WG] Running command:', cmd.replace(PIA_PASSWORD, '***'));
+
+    await new Promise((resolve, reject) => {
+        exec(cmd, { timeout: 30000, env: { ...process.env, GODEBUG: 'x509ignoreCN=0' } }, (error, stdout, stderr) => {
+            console.log('[PIA-WG] stdout:', stdout);
+            console.log('[PIA-WG] stderr:', stderr);
+            if (error) reject(new Error(stderr || stdout || error.message));
+            else resolve(stdout + stderr);
+        });
+    });
+
+    let privateKey = '', address = '', endpoint = '', publicKey = '', serverName = null;
+    if (fs.existsSync(wgConfPath)) {
+        const wgConf = fs.readFileSync(wgConfPath, 'utf8');
+        console.log('[PIA-WG] Generated wg0.conf:', wgConf);
+
+        const pkMatch = wgConf.match(/PrivateKey\s*=\s*(.+)/);
+        if (pkMatch) privateKey = pkMatch[1].trim();
+
+        const addrMatch = wgConf.match(/Address\s*=\s*(.+)/);
+        if (addrMatch) {
+            const addrs = addrMatch[1].trim().split(',').map(a => a.trim());
+            let ipv4 = addrs.find(a => a.includes('.'));
+            if (!ipv4) ipv4 = addrs[0];
+            address = ipv4.includes('/') ? ipv4 : ipv4 + '/32';
+        }
+
+        const epMatch = wgConf.match(/Endpoint\s*=\s*(.+)/);
+        if (epMatch) endpoint = epMatch[1].trim();
+
+        const pubMatch = wgConf.match(/PublicKey\s*=\s*(.+)/);
+        if (pubMatch) publicKey = pubMatch[1].trim();
+
+        const serverMatch = wgConf.match(/ServerCommonName\s*=\s*(.+)/i);
+        if (serverMatch) {
+            serverName = serverMatch[1].trim();
+        } else {
+            const headerMatch = wgConf.match(/#\s*Server:\s*(.+)/);
+            if (headerMatch) serverName = headerMatch[1].trim();
+        }
+    }
+
+    if (!privateKey) {
+        throw new Error('Failed to parse PrivateKey from generated wg0.conf. The file may be corrupted.');
+    }
+
+    let endpointIP = '', endpointPort = '1337';
+    if (endpoint) {
+        const epParts = endpoint.split(':');
+        endpointIP = epParts[0];
+        if (epParts[1]) endpointPort = epParts[1];
+    }
+
+    const parsedVars = {
+        VPN_SERVICE_PROVIDER: 'custom',
+        VPN_TYPE: 'wireguard',
+        WIREGUARD_PRIVATE_KEY: privateKey,
+        WIREGUARD_ADDRESSES: address,
+        WIREGUARD_ENDPOINT_IP: endpointIP,
+        WIREGUARD_ENDPOINT_PORT: endpointPort,
+        WIREGUARD_PUBLIC_KEY: publicKey,
+    };
+
+    const gluetunEnvFile = Object.entries(parsedVars)
+        .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
+        .map(([k, v]) => `${k}=${v}`)
+        .join('\n') + '\n';
+
+    fs.writeFileSync(GLUETUN_ENV_PATH, gluetunEnvFile, 'utf8');
+    console.log('[PIA-WG] Wrote gluetun env to:', GLUETUN_ENV_PATH);
+
+    let envVars = {};
+    if (fs.existsSync(ENV_PATH)) {
+        const data = fs.readFileSync(ENV_PATH, 'utf8');
+        data.split('\n').forEach(line => {
+            if (line && line.includes('=')) {
+                const parts = line.split('=');
+                envVars[parts[0]] = parts.slice(1).join('=').trim();
+            }
+        });
+    }
+    envVars.PIA_USERNAME = PIA_USERNAME;
+    envVars.PIA_PASSWORD = PIA_PASSWORD;
+    envVars.PIA_REGIONS = PIA_REGIONS;
+    envVars.PIA_REGION_INDEX = PIA_REGION_INDEX;
+    envVars.PIA_PORT_FORWARDING = PIA_PORT_FORWARDING || 'false';
+    envVars.VPN_SERVICE_PROVIDER = 'private internet access';
+    envVars.VPN_TYPE = 'wireguard';
+    if (serverName) envVars.SERVER_NAMES = serverName;
+
+    let newEnv = '';
+    for (const [k, v] of Object.entries(envVars)) {
+        newEnv += `${k}=${v}\n`;
+    }
+    fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
+
+    const newEnvArray = [
+        'VPN_SERVICE_PROVIDER=custom',
+        'VPN_TYPE=wireguard',
+        `WIREGUARD_PRIVATE_KEY=${privateKey}`,
+        `WIREGUARD_ADDRESSES=${address}`,
+        `WIREGUARD_ENDPOINT_IP=${endpointIP}`,
+        `WIREGUARD_ENDPOINT_PORT=${endpointPort}`,
+        `WIREGUARD_PUBLIC_KEY=${publicKey}`,
+    ];
+    if (serverName) {
+        newEnvArray.push(`SERVER_NAMES=${serverName}`);
+        console.log(`[PIA-WG] Syncing SERVER_NAMES=${serverName} for port forwarding support.`);
+    }
+
+    let restartMsg = '';
+    const containers = await docker.listContainers({ all: true });
+    const gluetunInfo = containers.find(c => c.Names.some(n => n.includes('gluetun') && !n.includes('gui')));
+    if (gluetunInfo) {
+        const oldContainer = docker.getContainer(gluetunInfo.Id);
+        const inspectData = await oldContainer.inspect();
+
+        await oldContainer.stop().catch(() => { });
+        await oldContainer.remove().catch(() => { });
+
+        const oldConfig = inspectData.Config;
+        const hostConfig = inspectData.HostConfig;
+
+        const keysToReplace = new Set(newEnvArray.map(e => e.split('=')[0]));
+        let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
+
+        const forbiddenKeysForCustom = new Set(['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES']);
+        filteredOldEnv = filteredOldEnv.filter(e => {
+            const key = e.split('=')[0];
+            if (forbiddenKeysForCustom.has(key)) return false;
+            if (key === 'SERVER_NAMES' && !keysToReplace.has('SERVER_NAMES')) return false;
+            if (key.startsWith('OPENVPN_')) return false;
+            return true;
+        });
+
+        filteredOldEnv = filteredOldEnv.map(e => {
+            if (e.startsWith('DNS_UPSTREAM_RESOLVERS=') || e.startsWith('DOT_PROVIDERS=')) {
+                return e.split('=')[0] + '=' + e.split('=')[1].split(',').map(s => s.trim().toLowerCase() === 'mullvad' ? 'quad9' : s).join(',');
+            }
+            return e;
+        });
+
+        const mergedEnv = [...filteredOldEnv, ...newEnvArray];
+
+        const createOpts = {
+            name: inspectData.Name.replace(/^\//, ''),
+            Image: oldConfig.Image,
+            Env: mergedEnv,
+            ExposedPorts: oldConfig.ExposedPorts,
+            HostConfig: { ...hostConfig },
+            Labels: oldConfig.Labels,
+        };
+
+        const newContainer = await docker.createContainer(createOpts);
+        await newContainer.start();
+        restartMsg = ' Gluetun recreated with new WireGuard config.';
+        console.log('[PIA-WG] Gluetun container recreated successfully');
+    } else {
+        restartMsg = ' Warning: Gluetun container not found.';
+    }
+
+    return { privateKey, serverName, restartMsg };
+}
+
 // PIA WireGuard Config Generation
 let piaRefreshStatus = { state: 'idle', message: 'No generation attempted yet', lastGenerated: null, failCount: 0 };
 
@@ -796,202 +1032,15 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
 
     piaRefreshStatus = { state: 'generating', message: 'Generating WireGuard config...', lastGenerated: null, failCount: 0 };
 
-    const pfFlag = PIA_PORT_FORWARDING === 'true' ? ' -p' : '';
-    const safeRegion = PIA_REGION.replace(/[^a-zA-Z0-9_-]/g, '');
-    // pia-wg-config expects: pia-wg-config [flags] <username> <password>
-    const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
-    const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
-
-    console.log('[PIA-Generate] Running command:', cmd.replace(PIA_PASSWORD, '***'));
-
     try {
-        const result = await new Promise((resolve, reject) => {
-            exec(cmd, { timeout: 30000, env: { ...process.env, GODEBUG: 'x509ignoreCN=0' } }, (error, stdout, stderr) => {
-                console.log('[PIA-Generate] stdout:', stdout);
-                console.log('[PIA-Generate] stderr:', stderr);
-                if (error) {
-                    reject(new Error(stderr || stdout || error.message));
-                } else {
-                    resolve(stdout + stderr);
-                }
-            });
+        const { privateKey, serverName, restartMsg } = await applyPiaWireguardFromCredentials({
+            PIA_USERNAME,
+            PIA_PASSWORD,
+            PIA_REGION,
+            PIA_PORT_FORWARDING: PIA_PORT_FORWARDING || 'false',
+            PIA_REGIONS,
+            PIA_REGION_INDEX: '0',
         });
-
-        // Parse the generated wg0.conf for WireGuard values
-        let privateKey = '', address = '', endpoint = '', publicKey = '', serverName = null;
-        try {
-            if (fs.existsSync(wgConfPath)) {
-                const wgConf = fs.readFileSync(wgConfPath, 'utf8');
-                console.log('[PIA-Generate] Generated wg0.conf:', wgConf);
-
-                const pkMatch = wgConf.match(/PrivateKey\s*=\s*(.+)/);
-                if (pkMatch) privateKey = pkMatch[1].trim();
-
-                const addrMatch = wgConf.match(/Address\s*=\s*(.+)/);
-                if (addrMatch) {
-                    const addrs = addrMatch[1].trim().split(',').map(a => a.trim());
-                    let ipv4 = addrs.find(a => a.includes('.'));
-                    if (!ipv4) ipv4 = addrs[0];
-                    address = ipv4.includes('/') ? ipv4 : ipv4 + '/32';
-                }
-
-                const epMatch = wgConf.match(/Endpoint\s*=\s*(.+)/);
-                if (epMatch) endpoint = epMatch[1].trim();
-
-                const pubMatch = wgConf.match(/PublicKey\s*=\s*(.+)/);
-                if (pubMatch) publicKey = pubMatch[1].trim();
-
-                // Extract ServerCommonName - used to pin Gluetun for port forwarding
-                const serverMatch = wgConf.match(/ServerCommonName\s*=\s*(.+)/i);
-                if (serverMatch) {
-                    serverName = serverMatch[1].trim();
-                } else {
-                    // Fallback to our custom header if ServerCommonName isn't a native field
-                    const headerMatch = wgConf.match(/#\s*Server:\s*(.+)/);
-                    if (headerMatch) serverName = headerMatch[1].trim();
-                }
-            }
-        } catch (e) {
-            console.error('[PIA-Generate] Error parsing wg0.conf:', e.message);
-        }
-
-        if (!privateKey) {
-            throw new Error('Failed to parse PrivateKey from generated wg0.conf. The file may be corrupted.');
-        }
-
-        // Parse endpoint into IP and port
-        let endpointIP = '', endpointPort = '1337';
-        if (endpoint) {
-            const epParts = endpoint.split(':');
-            endpointIP = epParts[0];
-            if (epParts[1]) endpointPort = epParts[1];
-        }
-
-        // Write Gluetun env file with parsed WireGuard values
-        const parsedVars = {
-            VPN_SERVICE_PROVIDER: 'custom',
-            VPN_TYPE: 'wireguard',
-            WIREGUARD_PRIVATE_KEY: privateKey,
-            WIREGUARD_ADDRESSES: address,
-            WIREGUARD_ENDPOINT_IP: endpointIP,
-            WIREGUARD_ENDPOINT_PORT: endpointPort,
-            WIREGUARD_PUBLIC_KEY: publicKey,
-        };
-        
-        const gluetunEnv = Object.entries(parsedVars)
-            .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
-            .map(([k, v]) => `${k}=${v}`)
-            .join('\n') + '\n';
-
-        fs.writeFileSync(GLUETUN_ENV_PATH, gluetunEnv, 'utf8');
-        console.log('[PIA-Generate] Wrote gluetun env to:', GLUETUN_ENV_PATH);
-
-        // Save PIA credentials to GUI .env for persistence
-        let envVars = {};
-        if (fs.existsSync(ENV_PATH)) {
-            const data = fs.readFileSync(ENV_PATH, 'utf8');
-            data.split('\n').forEach(line => {
-                if (line && line.includes('=')) {
-                    const parts = line.split('=');
-                    envVars[parts[0]] = parts.slice(1).join('=').trim();
-                }
-            });
-        }
-        envVars.PIA_USERNAME = PIA_USERNAME;
-        envVars.PIA_PASSWORD = PIA_PASSWORD;
-        envVars.PIA_REGIONS = PIA_REGIONS;
-        envVars.PIA_REGION_INDEX = '0';
-        envVars.PIA_PORT_FORWARDING = PIA_PORT_FORWARDING || 'false';
-        envVars.VPN_SERVICE_PROVIDER = 'private internet access';
-        envVars.VPN_TYPE = 'wireguard';
-        if (serverName) envVars.SERVER_NAMES = serverName;
-
-        let newEnv = '';
-        for (const [k, v] of Object.entries(envVars)) {
-            newEnv += `${k}=${v}\n`;
-        }
-        fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
-
-        // Recreate Gluetun container with new WireGuard env vars via Dockerode
-        const newEnvArray = [
-            'VPN_SERVICE_PROVIDER=custom',
-            'VPN_TYPE=wireguard',
-            `WIREGUARD_PRIVATE_KEY=${privateKey}`,
-            `WIREGUARD_ADDRESSES=${address}`,
-            `WIREGUARD_ENDPOINT_IP=${endpointIP}`,
-            `WIREGUARD_ENDPOINT_PORT=${endpointPort}`,
-            `WIREGUARD_PUBLIC_KEY=${publicKey}`,
-        ];
-        if (serverName) {
-            newEnvArray.push(`SERVER_NAMES=${serverName}`);
-            console.log(`[PIA-Generate] Syncing SERVER_NAMES=${serverName} for port forwarding support.`);
-        }
-
-        let restartMsg = '';
-        try {
-            const containers = await docker.listContainers({ all: true });
-            const gluetunInfo = containers.find(c => c.Names.some(n => n.includes('gluetun') && !n.includes('gui')));
-            if (gluetunInfo) {
-                const oldContainer = docker.getContainer(gluetunInfo.Id);
-                const inspectData = await oldContainer.inspect();
-
-                // Stop and remove old container
-                await oldContainer.stop().catch(() => { });
-                await oldContainer.remove().catch(() => { });
-
-                // Rebuild config from inspected container, replacing env vars
-                const oldConfig = inspectData.Config;
-                const hostConfig = inspectData.HostConfig;
-
-                // Merge: keep non-VPN/WG env vars from old config, add new VPN ones
-                const keysToReplace = new Set(newEnvArray.map(e => e.split('=')[0]));
-                let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
-                
-                // Aggressively strip generic server params and openvpn params from the old env
-                // But ALLOW SERVER_NAMES if it's explicitly in our newEnvArray (synced from wg0.conf)
-                const forbiddenKeysForCustom = new Set(['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES']);
-                filteredOldEnv = filteredOldEnv.filter(e => {
-                    const key = e.split('=')[0];
-                    if (forbiddenKeysForCustom.has(key)) return false;
-                    // Only strip SERVER_NAMES if it's NOT in our new replacement set
-                    if (key === 'SERVER_NAMES' && !keysToReplace.has('SERVER_NAMES')) return false;
-                    if (key.startsWith('OPENVPN_')) return false;
-                    return true;
-                });
-
-                // Scrub obsolete mullvad provider from old environment
-                filteredOldEnv = filteredOldEnv.map(e => {
-                    if (e.startsWith('DNS_UPSTREAM_RESOLVERS=') || e.startsWith('DOT_PROVIDERS=')) {
-                        return e.split('=')[0] + '=' + e.split('=')[1].split(',').map(s => s.trim().toLowerCase() === 'mullvad' ? 'quad9' : s).join(',');
-                    }
-                    return e;
-                });
-
-                const mergedEnv = [...filteredOldEnv, ...newEnvArray];
-
-                const createOpts = {
-                    name: inspectData.Name.replace(/^\//, ''),
-                    Image: oldConfig.Image,
-                    Env: mergedEnv,
-                    ExposedPorts: oldConfig.ExposedPorts,
-                    HostConfig: {
-                        ...hostConfig,
-                        // Preserve existing mounts, port bindings, cap_add, devices
-                    },
-                    Labels: oldConfig.Labels,
-                };
-
-                const newContainer = await docker.createContainer(createOpts);
-                await newContainer.start();
-                restartMsg = ' Gluetun recreated with new WireGuard config.';
-                console.log('[PIA-Generate] Gluetun container recreated successfully');
-            } else {
-                restartMsg = ' Warning: Gluetun container not found.';
-            }
-        } catch (restartErr) {
-            console.error('[PIA-Generate] Gluetun recreate failed:', restartErr.message);
-            restartMsg = ' Note: Please manually run "docker compose up -d gluetun" on the host to apply the new config.';
-        }
 
         piaRefreshStatus = {
             state: 'success',
@@ -1020,12 +1069,10 @@ app.post('/api/pia/generate', authenticateToken, async (req, res) => {
 const distPath = path.join(__dirname, 'public');
 if (fs.existsSync(distPath)) {
     app.use(express.static(distPath));
-    app.use((req, res) => {
-        if (!req.path.startsWith('/api/')) {
-            res.sendFile(path.join(distPath, 'index.html'));
-        } else {
-            res.status(404).json({ error: 'API route not found' });
-        }
+    // Important: do not swallow /api routes defined below
+    app.use((req, res, next) => {
+        if (req.path.startsWith('/api/')) return next();
+        return res.sendFile(path.join(distPath, 'index.html'));
     });
 }
 
@@ -1033,9 +1080,113 @@ if (fs.existsSync(distPath)) {
 let failCount = 0;
 let pfFailCount = 0;
 let lastForwardedPort = null;
+let lastMonitoringSnapshot = null;
 const FAIL_THRESHOLD = 3;
 const CHECK_INTERVAL = 60 * 1000;          // 1 minute when failing
 const HEALTHY_INTERVAL = 15 * 60 * 1000;    // 15 minutes when healthy
+
+/** Docker exec attach returns multiplexed stdout/stderr (8-byte header per frame). Strip to plain text. */
+function demuxDockerExecOutput(buf) {
+    if (!buf || !buf.length) return '';
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+    // Not Docker multiplex (JSON etc. starts with `{` or ASCII text)
+    if (b[0] !== 1 && b[0] !== 2) return b.toString('utf8');
+    let out = Buffer.alloc(0);
+    let offset = 0;
+    while (offset < b.length) {
+        if (b.length - offset < 8) {
+            out = Buffer.concat([out, b.subarray(offset)]);
+            break;
+        }
+        const streamType = b[offset];
+        const size = b.readUInt32BE(offset + 4);
+        if ((streamType === 1 || streamType === 2) && size > 0 && offset + 8 + size <= b.length) {
+            out = Buffer.concat([out, b.subarray(offset + 8, offset + 8 + size)]);
+            offset += 8 + size;
+        } else {
+            out = Buffer.concat([out, b.subarray(offset)]);
+            break;
+        }
+    }
+    return out.toString('utf8');
+}
+
+async function collectExecOutput(stream, timeoutMs = 7000) {
+    const chunks = [];
+    await new Promise((resolve) => {
+        stream.on('data', (c) => chunks.push(c));
+        stream.on('end', resolve);
+        stream.on('error', resolve);
+        setTimeout(resolve, timeoutMs);
+    });
+    return demuxDockerExecOutput(Buffer.concat(chunks));
+}
+
+async function restartGluetunContainerHelper() {
+    const containers = await docker.listContainers({ all: true });
+    const gluetun = containers.find(c => c.Names.some(n => n.includes('gluetun') && !n.includes('gui')));
+    if (!gluetun) {
+        console.log('[Failover] Gluetun container not found for restart.');
+        return;
+    }
+    await docker.getContainer(gluetun.Id).restart();
+    console.log('[Failover] Gluetun container restarted.');
+}
+
+/**
+ * Advance PIA_REGION_INDEX and reconnect (WireGuard: regenerate; OpenVPN PIA: new SERVER_REGIONS).
+ */
+async function executeFailoverRotation() {
+    const env = readGuiEnv();
+    const vpnType = (env.VPN_TYPE || 'wireguard').toLowerCase();
+
+    const wgRegions = (env.PIA_WG_REGIONS || env.PIA_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const ovRegions = (env.PIA_OPENVPN_REGIONS || env.PIA_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const regions = vpnType === 'openvpn'
+        ? (ovRegions.length ? ovRegions : wgRegions)
+        : (wgRegions.length ? wgRegions : ovRegions);
+
+    if (!regions.length) {
+        console.log('[Failover] No regions in GUI env; restarting Gluetun only.');
+        await restartGluetunContainerHelper();
+        return;
+    }
+
+    let idx = parseInt(env.PIA_REGION_INDEX || '0', 10);
+    if (isNaN(idx) || idx < 0) idx = 0;
+    const nextIdx = (idx + 1) % regions.length;
+    env.PIA_REGION_INDEX = String(nextIdx);
+    writeGuiEnv(env);
+
+    const targetRegion = regions[nextIdx];
+    console.log(`[Failover] Rotating to index ${nextIdx}/${regions.length - 1}: ${targetRegion}`);
+
+    if (regions.length === 1) {
+        console.log('[Failover] Only one region configured; restarting Gluetun.');
+        await restartGluetunContainerHelper();
+        return;
+    }
+
+    if (vpnType === 'wireguard' && env.PIA_USERNAME && env.PIA_PASSWORD) {
+        await applyPiaWireguardFromCredentials({
+            PIA_USERNAME: env.PIA_USERNAME,
+            PIA_PASSWORD: env.PIA_PASSWORD,
+            PIA_REGION: targetRegion,
+            PIA_PORT_FORWARDING: env.PIA_PORT_FORWARDING || 'false',
+            PIA_REGIONS: env.PIA_WG_REGIONS || env.PIA_REGIONS || regions.join(','),
+            PIA_REGION_INDEX: String(nextIdx),
+        });
+        return;
+    }
+
+    if (vpnType === 'openvpn' && (env.VPN_SERVICE_PROVIDER || '').toLowerCase().includes('private internet access')) {
+        await recreateGluetunContainer({ SERVER_REGIONS: targetRegion });
+        return;
+    }
+
+    console.log('[Failover] No PIA rotation path matched; restarting Gluetun.');
+    await restartGluetunContainerHelper();
+}
 
 async function checkVPN() {
     let monitoringData = {
@@ -1064,26 +1215,38 @@ async function checkVPN() {
             failCount++;
         } else {
             // 1. Check Connectivity via Gluetun API (most reliable)
-            const getIpCmd = `wget -qO- --timeout=5 http://localhost:8000/v1/publicip/ip`;
+            // NOTE: Gluetun control server can be auth-protected (401). Fall back to ipify which
+            // works without control-server auth and still validates outbound connectivity.
+            const getIpCmd = `wget -qO- --timeout=5 http://127.0.0.1:8000/v1/publicip/ip`;
             const ipExec = await container.exec({ Cmd: ['sh', '-c', getIpCmd], AttachStdout: true, AttachStderr: true });
             const ipStream = await ipExec.start();
-            
-            const ipOutput = await new Promise((resolve) => {
-                let data = '';
-                ipStream.on('data', chunk => data += chunk.toString());
-                ipStream.on('end', () => resolve(data));
-                setTimeout(() => resolve(''), 7000);
-            });
 
-            if (ipOutput.includes('"public_ip"')) {
+            const ipOutput = await collectExecOutput(ipStream);
+
+            const isAuthError = /Authentication Failed/i.test(ipOutput) || /\b401\b/.test(ipOutput);
+            if (ipOutput.includes('"public_ip"') && !isAuthError) {
                 const match = ipOutput.match(/"public_ip":"([^"]+)"/);
                 monitoringData.publicIp = match ? match[1] : 'unknown';
                 monitoringData.connected = true;
                 failCount = 0;
                 console.log(`[Monitor] VPN Connected. Public IP: ${monitoringData.publicIp}`);
             } else {
-                failCount++;
-                console.log(`[Monitor] Connectivity check failed (${failCount}/${FAIL_THRESHOLD})`);
+                // Fallback: external public IP check (no control-server auth required)
+                const ipifyCmd = `wget -qO- --timeout=8 https://api.ipify.org?format=json`;
+                const ipifyExec = await container.exec({ Cmd: ['sh', '-c', ipifyCmd], AttachStdout: true, AttachStderr: true });
+                const ipifyStream = await ipifyExec.start();
+                const ipifyOut = await collectExecOutput(ipifyStream);
+                if (ipifyOut.includes('"ip"')) {
+                    const match = ipifyOut.match(/"ip":"([^"]+)"/);
+                    monitoringData.publicIp = match ? match[1] : 'unknown';
+                    monitoringData.connected = true;
+                    failCount = 0;
+                    console.log(`[Monitor] VPN Connected (fallback). Public IP: ${monitoringData.publicIp}`);
+                } else {
+                    failCount++;
+                    const preview = (isAuthError ? ipOutput : ipifyOut).replace(/\s+/g, ' ').slice(0, 140);
+                    console.log(`[Monitor] Connectivity check failed (${failCount}/${FAIL_THRESHOLD})${preview ? ` — response: ${preview}` : ''}`);
+                }
             }
 
             // 2. Check Port Forwarding if enabled
@@ -1098,17 +1261,13 @@ async function checkVPN() {
                 });
             }
 
-            if (envVars.PIA_PORT_FORWARDING === 'true' && monitoringData.connected) {
-                const getPortCmd = `wget -qO- --timeout=5 http://localhost:8000/v1/portforward`;
+            const piaPfEnabled = envVars.PIA_PORT_FORWARDING === 'true' || envVars.PIA_PORT_FORWARDING === 'on';
+            if (piaPfEnabled && monitoringData.connected) {
+                const getPortCmd = `wget -qO- --timeout=5 http://127.0.0.1:8000/v1/portforward`;
                 const portExec = await container.exec({ Cmd: ['sh', '-c', getPortCmd], AttachStdout: true, AttachStderr: true });
                 const portStream = await portExec.start();
-                
-                const portOutput = await new Promise((resolve) => {
-                    let data = '';
-                    portStream.on('data', chunk => data += chunk.toString());
-                    portStream.on('end', () => resolve(data));
-                    setTimeout(() => resolve(''), 7000);
-                });
+
+                const portOutput = await collectExecOutput(portStream);
 
                 if (portOutput.includes('"port"')) {
                     const match = portOutput.match(/"port":([0-9]+)/);
@@ -1128,8 +1287,32 @@ async function checkVPN() {
                         console.log(`[Monitor] Port Forwarding reported port 0 (${pfFailCount}/${FAIL_THRESHOLD})`);
                     }
                 } else {
-                    pfFailCount++;
-                    console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${FAIL_THRESHOLD})`);
+                    // Fallback: read forwarded port from status file inside container.
+                    // Gluetun commonly writes it to /tmp/gluetun/forwarded_port (see VPN_PORT_FORWARDING_STATUS_FILE).
+                    const statusFile = '/tmp/gluetun/forwarded_port';
+                    const fileCmd = `sh -lc 'test -f ${statusFile} && cat ${statusFile} || true'`;
+                    const fileExec = await container.exec({ Cmd: ['sh', '-c', fileCmd], AttachStdout: true, AttachStderr: true });
+                    const fileStream = await fileExec.start();
+                    const fileOut = (await collectExecOutput(fileStream)).trim();
+                    const filePort = fileOut.match(/([0-9]{2,6})/) ? parseInt(fileOut.match(/([0-9]{2,6})/)[1], 10) : 0;
+
+                    if (filePort > 0) {
+                        monitoringData.port = filePort;
+                        monitoringData.portForwarding = true;
+                        pfFailCount = 0;
+                        if (lastForwardedPort && lastForwardedPort !== filePort) {
+                            console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${filePort}`);
+                        }
+                        lastForwardedPort = filePort;
+                        console.log(`[Monitor] Port Forwarding Active (file): ${filePort}`);
+                    } else if (/Authentication Failed/i.test(portOutput)) {
+                        // If control server is auth-protected and file isn't available, don't count as failure.
+                        pfFailCount = 0;
+                        console.log('[Monitor] Port Forwarding check skipped (control server requires auth).');
+                    } else {
+                        pfFailCount++;
+                        console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${FAIL_THRESHOLD})`);
+                    }
                 }
             }
         }
@@ -1137,6 +1320,9 @@ async function checkVPN() {
         console.error('[Monitor] Loop error:', err.message);
         failCount++;
     }
+
+    // Persist last snapshot for UI consumption
+    lastMonitoringSnapshot = { ...monitoringData };
 
     // 3. Handle Failures
     if (failCount >= FAIL_THRESHOLD || pfFailCount >= FAIL_THRESHOLD) {
@@ -1162,8 +1348,23 @@ app.get('/api/pia/monitoring', authenticateToken, (req, res) => {
         failCount,
         pfFailCount,
         lastForwardedPort,
+        connected: lastMonitoringSnapshot?.connected ?? null,
+        publicIp: lastMonitoringSnapshot?.publicIp ?? null,
+        portForwarding: lastMonitoringSnapshot?.portForwarding ?? null,
+        port: lastMonitoringSnapshot?.port ?? null,
+        timestamp: lastMonitoringSnapshot?.timestamp ?? null,
         checkInterval: (failCount > 0 || pfFailCount > 0) ? CHECK_INTERVAL : HEALTHY_INTERVAL
     });
+});
+
+app.post('/api/test-failover', authenticateToken, async (req, res) => {
+    try {
+        await executeFailoverRotation();
+        res.json({ message: 'Failover rotation executed.' });
+    } catch (err) {
+        console.error('[Test-Failover]', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Start checker after a short delay

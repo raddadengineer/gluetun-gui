@@ -94,6 +94,10 @@ services:
 └─────────────────────────────────────────────────┘
 ```
 
+For a full end-to-end walkthrough (including monitoring/failover and port forwarding), see:
+
+- `docs/ARCHITECTURE.md`
+
 ### How Configuration Works
 
 1. **GUI is the single source of truth.** All settings are stored in `data/gui-config.env`.
