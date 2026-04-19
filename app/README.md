@@ -37,4 +37,6 @@ Commit or copy the generated **`server/public/`** tree as required by your deplo
 - **Recharts** — Dashboard throughput
 - **date-fns** — Relative times
 
-For full system behavior (Docker, monitoring, PIA, export/import), read **`../docs/ARCHITECTURE.md`**.
+**Settings** (`pages/Settings.jsx`) uses tabs: **VPN & tunnel**, **Firewall & ports** (includes `DNS_UPSTREAM_IPV6` / IPv6 upstream DNS toggle mirrored with the DNS tab), **DNS & blocklists**, **Local proxies**, **This app**, **Gluetun advanced** — all values POST to **`/api/config`** except export/import, which use dedicated routes.
+
+For full system behavior (Docker, monitoring, PIA OpenVPN region/PF logic, export/import), read **`../docs/ARCHITECTURE.md`**.

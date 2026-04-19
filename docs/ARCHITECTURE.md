@@ -60,11 +60,13 @@ Password source: `GUI_PASSWORD` in `gui-config.env`, default `gluetun-admin`. Ch
 | Tab | Scope |
 |-----|--------|
 | **VPN & tunnel** | Provider, `VPN_TYPE`, PIA WireGuard / PIA OpenVPN panels, or generic provider server filters + WireGuard/OpenVPN fields. |
-| **Firewall & ports** | `FIREWALL_*`, VPN port forwarding (`VPN_PORT_FORWARDING_*`). |
-| **DNS & blocklists** | Resolvers, blocklists, DNS toggles. Public IP logging is under **Gluetun advanced** (`PUBLICIP_*`). |
+| **Firewall & ports** | `FIREWALL_*`, **`DNS_UPSTREAM_IPV6`** (IPv6 for Gluetun DNS upstream — same control as **DNS & blocklists → IPv6 DNS**), VPN port forwarding (`VPN_PORT_FORWARDING_*`). |
+| **DNS & blocklists** | Resolvers, blocklists, DNS toggles including **`DNS_UPSTREAM_IPV6`**. Public IP logging is under **Gluetun advanced** (`PUBLICIP_*`). |
 | **Local proxies** | Shadowsocks, HTTP proxy. |
 | **This app** | Theme, GUI password, notifications, **config export/import** (browser only; not sent to Gluetun as env). |
 | **Gluetun advanced** | Log level, health check, updater, system/identity (`TZ`, `PUBLICIP_ENABLED`, …), VPN hooks. |
+
+> **IPv6 scope:** `DNS_UPSTREAM_IPV6` only affects how Gluetun reaches **DNS upstreams** (Gluetun also accepts legacy `DOT_IPV6`). Full stack IPv6 in the container is still governed by the host/Docker **`sysctls`**, not this GUI alone.
 
 ## Config save → Gluetun
 
@@ -77,7 +79,7 @@ sequenceDiagram
 
   UI->>API: POST /api/config (JSON body)
   API->>API: applyGuiConfiguration()
-  Note over API: PIA OpenVPN: sanitize PIA_OPENVPN_REGIONS vs servers.json; strip stale SERVER_*; copy PIA_* to OPENVPN_* if needed
+  Note over API: PIA OpenVPN: alias→region; PF on→drop non-PF regions; strip SERVER_*; copy PIA_*→OPENVPN_* if needed
   API->>API: write gui-config.env
   API->>API: build gluetun env (GUI-only keys removed, booleans on/off, WG custom mapping for PIA)
   API->>API: write gluetun.env
@@ -87,17 +89,27 @@ sequenceDiagram
 
 **`applyGuiConfiguration`** is also used by **`POST /api/config/import`** (same pipeline as Save).
 
+### `GET /api/config` (load for UI)
+
+- Migrates deprecated env key names and may **rewrite `PIA_OPENVPN_REGIONS`** to Gluetun **region labels** (alias map from `servers.json`).
+- When **`VPN_PORT_FORWARDING`** or **`PIA_PORT_FORWARDING`** is on, drops OpenVPN region tokens that have **no** `port_forward: true` server in Gluetun’s PIA OpenVPN data, then persists if changed.
+
 ### PIA WireGuard vs container `VPN_SERVICE_PROVIDER`
 
 For **PIA WireGuard**, the GUI keeps `VPN_SERVICE_PROVIDER=private internet access` in `gui-config.env`, but Gluetun runs with **`custom`** and explicit `WIREGUARD_*` + optional `SERVER_NAMES`. The Dashboard uses **`/api/status`** fields `displayProvider` / `gui.VPN_SERVICE_PROVIDER` for the label.
 
-### PIA OpenVPN (Gluetun region labels)
+### PIA OpenVPN (Gluetun region labels & port forwarding)
 
-- Gluetun validates **`SERVER_REGIONS`** against **human-readable region labels** from `servers.json` (e.g. `DE Berlin`, `DE Germany Streaming Optimized`), **not** internal `server_name` host tokens (e.g. `berlin422`).
-- The GUI stores **`PIA_OPENVPN_REGIONS`** as those labels (comma-separated failover). Legacy configs may still list `server_name` tokens; **`sanitizePiaOpenVpnServerSelection`** maps aliases → region via **`getPiaOpenVpnAliasToRegionMap`**.
-- **`GET /api/helpers/servers`** (PIA + OpenVPN) returns **`server_names`** populated with sorted **unique regions** so the tag cloud matches what Gluetun expects. With **`portForwardOnly=1`**, only regions that have at least one OpenVPN server with **`port_forward: true`** in `servers.json` are returned (matches Gluetun’s “port forwarding only” filter; many US state regions are omitted).
-- On save/import, invalid tokens are dropped; generic **`SERVER_*`** keys are removed for PIA+OpenVPN so WireGuard-style ids cannot leak into the container.
-- **`OPENVPN_USER` / `OPENVPN_PASSWORD`**: if empty but **`PIA_USERNAME` / `PIA_PASSWORD`** are set, they are copied before writing env (Gluetun does not read `PIA_*` for OpenVPN auth).
+- Gluetun validates **`SERVER_REGIONS`** against **human-readable region labels** from `servers.json` (e.g. `DE Berlin`), **not** internal `server_name` tokens (e.g. `berlin422`). **`getPiaOpenVpnAliasToRegionMap`** maps aliases → region on save/import and in failover.
+- **`PIA_OPENVPN_REGIONS`** stores the comma-separated failover list (labels). **`PIA_PORT_FORWARDING`** is shared with the WireGuard panel; OpenVPN also respects **`VPN_PORT_FORWARDING=on`** from **Firewall & ports** when deciding PF-only behavior.
+- When port forwarding is **on** (`isPiaOpenVpnPortForwardingEnabled`), **`sanitizePiaOpenVpnServerSelection`** keeps only regions in **`getPiaOpenVpnPfRegionSet()`** (OpenVPN servers with `port_forward: true` in `servers.json`). Many **US state** regions have no such servers — prefer CA/EU-style labels or disable PF / use WireGuard for US + PF.
+- **`GET /api/helpers/servers`** (PIA + OpenVPN): sorted unique regions in **`server_names`**. Query **`portForwardOnly=1`** or **`true`** restricts to PF-capable regions (the UI passes this when the PIA PF toggle or **`VPN_PORT_FORWARDING`** is on).
+- Generic **`SERVER_*`** keys are stripped for PIA+OpenVPN so WireGuard-style ids cannot leak into the container.
+- **`OPENVPN_USER` / `OPENVPN_PASSWORD`**: if empty but **`PIA_USERNAME` / `PIA_PASSWORD`** are set, they are copied before writing env.
+
+### OpenVPN logs (`RTNETLINK … File exists`)
+
+OpenVPN may log **route already exists** during reconnects inside Gluetun; that is often **harmless** if the tunnel still comes up. Repeated **healthcheck** restart loops are a separate issue — see the [Gluetun healthcheck FAQ](https://github.com/qdm12/gluetun-wiki/blob/main/faq/healthcheck.md). The PIA OpenVPN panel in Settings links this for operators.
 
 ## PIA WireGuard: Generate keys & connect
 
@@ -118,7 +130,7 @@ Background **`checkVPN`** (starts after a short delay):
 5. **PIA port forwarding** (if enabled in GUI env): control `/v1/portforward`, else read **`/tmp/gluetun/forwarded_port`**.
 6. If **`failCount`** or **`pfFailCount`** ≥ **3**, runs **`executeFailoverRotation`**:
    - **WireGuard**: `pia-wg-config` for next region from `PIA_WG_REGIONS` / `PIA_REGIONS`.
-   - **OpenVPN (PIA)**: next entry from **`PIA_OPENVPN_REGIONS` only**, resolved to a region label before applying **`SERVER_REGIONS`**.
+   - **OpenVPN (PIA)**: next entry from **`PIA_OPENVPN_REGIONS` only**, resolved to a region label; if PF is on, skips regions not in **`getPiaOpenVpnPfRegionSet()`** before **`SERVER_REGIONS`** recreate.
 
 Intervals: **`CHECK_INTERVAL`** (1 min) when unhealthy signals, **`HEALTHY_INTERVAL`** (15 min) when healthy.
 
@@ -152,9 +164,11 @@ flowchart TD
 | `/api/login` | POST | JWT |
 | `/api/status` | GET | Engine status, `env[]`, **`image`**, **`imageId`**, **`containerName`**, session, **`gui`** (`VPN_SERVICE_PROVIDER`, `VPN_TYPE`, …), **`displayProvider`** |
 | `/api/metrics` | GET | Docker stats (engine container) |
-| `/api/config` | GET / POST | Read JSON config / save + recreate |
+| `/api/config` | GET / POST | Read JSON config (async migrations on GET) / save + recreate |
 | `/api/logs` | GET (SSE) | Multiplexed Gluetun + GUI logs (`?token=` allowed) |
-| `/api/sessions` | GET / DELETE | Session history |
+| `/api/sessions` | GET | Session history |
+| `/api/sessions` | DELETE | Clear all sessions |
+| `/api/sessions/:id` | DELETE | Delete one session by id |
 | `/api/restart` | POST | Restart engine |
 | `/api/stop` | POST | Stop engine |
 | `/api/pia/regions` | GET | PIA WireGuard regions (PIA API proxy) |
@@ -163,7 +177,7 @@ flowchart TD
 | `/api/pia/monitoring` | GET | Snapshot: `failCount`, `pfFailCount`, `connected`, `publicIp`, `port`, `checkInterval`, … |
 | `/api/test-failover` | POST | Manual failover rotation |
 | `/api/vpn/connectivity-test` | POST | One-shot **`execResolvePublicIp`** (does not advance monitor counters) |
-| `/api/helpers/servers` | GET | Gluetun `servers.json` (and PIA WG special-case); query `provider`, `vpnType`, optional `country` / `region` filters |
+| `/api/helpers/servers` | GET | Gluetun `servers.json` (and PIA WG special-case); query `provider`, `vpnType`, optional `country`, **`region`**, **`portForwardOnly`** (PIA OpenVPN PF-only region list) |
 
 ## In-app notifications (client only)
 

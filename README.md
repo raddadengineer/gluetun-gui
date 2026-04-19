@@ -9,13 +9,13 @@ A responsive, data-driven web UI for managing a [**Gluetun**](https://github.com
 - **Session history** — Bandwidth and metadata across container restarts (`sessions.json`).
 - **Logs** — SSE multiplex of Gluetun + GUI process logs; filter and severity styling (theme-aware).
 - **Settings** — Tabbed editor aligned with Gluetun env vars:
-  - **VPN & tunnel** — Provider, WireGuard/OpenVPN, **PIA** WireGuard (regions, generate keys) or **PIA OpenVPN** (Gluetun **region labels** for `SERVER_REGIONS`, not WireGuard region IDs), generic providers with server filters.
-  - **Firewall & ports** — Local subnets, input ports, VPN port forwarding.
-  - **DNS & blocklists** — Resolvers, filtering toggles, blocklists.
+  - **VPN & tunnel** — Provider, WireGuard/OpenVPN, **PIA** WireGuard (regions, generate keys, **Port Forwarding** toggle) or **PIA OpenVPN** (credentials, **same Port Forwarding toggle**, **region labels** for `SERVER_REGIONS`, failover list, protocol/version; not WireGuard API region IDs), generic providers with server filters.
+  - **Firewall & ports** — `FIREWALL_*` (outbound subnets, VPN/input ports, iptables log level), **IPv6** for upstream DNS (`DNS_UPSTREAM_IPV6`, mirrored with DNS tab), VPN port forwarding (`VPN_PORT_FORWARDING_*`).
+  - **DNS & blocklists** — Resolvers, filtering toggles, blocklists, **IPv6 DNS** (same `DNS_UPSTREAM_IPV6` as Firewall tab).
   - **Local proxies** — Shadowsocks, HTTP proxy.
   - **This app** — **Theme**, **GUI password**, **notifications** (bell + toasts), **backup/export/import** of `gui-config.env`.
   - **Gluetun advanced** — Logging, health check, updater, system/public IP options, VPN hooks.
-- **PIA automation** — WireGuard via `pia-wg-config`; multi-region **auto-failover** and optional port forwarding; OpenVPN uses Gluetun’s PIA **region** list (legacy internal host codes are mapped to regions on save).
+- **PIA automation** — WireGuard via `pia-wg-config`; multi-region **auto-failover** and optional port forwarding; OpenVPN uses Gluetun **region** labels from `servers.json`, maps legacy **`server_name`** tokens on load/save, and when **port forwarding** is on (`PIA_PORT_FORWARDING` or `VPN_PORT_FORWARDING`) only **PF-capable** OpenVPN regions are kept or listed.
 - **Notifications** — In-app bell, deduped events (save, monitor, dashboard actions, log warnings), configurable sources and toast levels (`localStorage`).
 - **Themes** — Multiple readable themes (`localStorage`).
 - **Docker** — Recreate Gluetun with merged env on every save/import; engine container resolved reliably (name `gluetun`, not `gluetun-gui`).
