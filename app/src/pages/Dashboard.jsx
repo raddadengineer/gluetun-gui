@@ -10,6 +10,7 @@ export default function Dashboard() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [vpnTestBusy, setVpnTestBusy] = useState(false);
   const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [prevNet, setPrevNet] = useState({ rx: 0, tx: 0, time: Date.now() });
@@ -265,6 +266,46 @@ export default function Dashboard() {
     }
   };
 
+  const handleConnectivityTest = async () => {
+    setMenuOpen(false);
+    setVpnTestBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/vpn/connectivity-test', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.ok) {
+        notify({
+          level: 'success',
+          title: 'VPN connectivity OK',
+          message: `Public IP: ${data.publicIp || '—'} (${data.method || 'probe'})`,
+          source: 'dashboard',
+          dedupeKey: 'vpn_connectivity_ok',
+        });
+      } else {
+        notify({
+          level: 'error',
+          title: 'VPN connectivity check failed',
+          message: (data.detail || data.error || res.statusText || 'No response from tunnel').slice(0, 240),
+          source: 'dashboard',
+          dedupeKey: 'vpn_connectivity_fail',
+        });
+      }
+    } catch (e) {
+      notify({
+        level: 'error',
+        title: 'VPN connectivity check failed',
+        message: e.message,
+        source: 'dashboard',
+        dedupeKey: 'vpn_connectivity_exc',
+      });
+    } finally {
+      setVpnTestBusy(false);
+    }
+  };
+
   const handleTestFailover = async () => {
     setLoading(true);
     try {
@@ -290,6 +331,7 @@ export default function Dashboard() {
     } catch (e) {
       console.error(e);
       notify({ level: 'error', title: 'Failover failed', message: e.message, source: 'dashboard', dedupeKey: 'test_failover_exc' });
+    } finally {
       setLoading(false);
     }
   };
@@ -315,6 +357,10 @@ export default function Dashboard() {
               <button className="dropdown-item" onClick={() => { setMenuOpen(false); handleRestart(); }} disabled={loading}>
                 <span className="material-icons-round" style={{ fontSize: '18px' }}>autorenew</span>
                 {loading ? "Waiting..." : "Restart Engine"}
+              </button>
+              <button className="dropdown-item" onClick={() => { handleConnectivityTest(); }} disabled={loading || vpnTestBusy}>
+                <span className="material-icons-round" style={{ fontSize: '18px' }}>network_ping</span>
+                {vpnTestBusy ? 'Testing…' : 'Test VPN connectivity'}
               </button>
               <button className="dropdown-item" onClick={() => { setMenuOpen(false); handleTestFailover(); }} disabled={loading}>
                 <span className="material-icons-round" style={{ fontSize: '18px' }}>rotate_right</span>
@@ -364,6 +410,23 @@ export default function Dashboard() {
               {status?.startedAt ? `Connected ${formatDistanceToNow(new Date(status.startedAt))} ago` : 'Uptime Unknown'}
             </p>
 
+            {status?.image && (
+              <p style={{ fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px', color: 'var(--text-secondary)', marginTop: '8px', lineHeight: 1.4 }}>
+                <span className="material-icons-round" style={{ fontSize: '14px', flexShrink: 0 }}>layers</span>
+                <span>
+                  <span style={{ display: 'block', wordBreak: 'break-all' }}>{status.image}</span>
+                  {status.imageId && (
+                    <span style={{ fontSize: '10px', opacity: 0.85 }}>
+                      {String(status.imageId).length > 22 ? `${String(status.imageId).slice(0, 22)}…` : status.imageId}
+                    </span>
+                  )}
+                  {status.containerName && (
+                    <span style={{ fontSize: '10px', display: 'block', opacity: 0.85 }}>Container: {status.containerName}</span>
+                  )}
+                </span>
+              </p>
+            )}
+
             {piaMonitoring?.portForwarding && (
               <p style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', marginTop: '6px' }}>
                 <span className="material-icons-round" style={{ fontSize: '14px', color: 'var(--success)' }}>hub</span>
@@ -381,7 +444,22 @@ export default function Dashboard() {
             <span className="status-badge" style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)' }}>PROTOCOL</span>
           </div>
           <div className="status-info">
-            <h3 style={{ fontSize: '24px' }}>{status?.parsedEnv?.VPN_TYPE?.toUpperCase() || 'WIREGUARD'}</h3>
+            {(() => {
+              const running = (status?.parsedEnv?.VPN_TYPE || '').toUpperCase() || 'UNKNOWN';
+              const configured = (status?.gui?.VPN_TYPE || '').toUpperCase() || null;
+              const show = configured || running || 'UNKNOWN';
+              const mismatch = configured && running && configured !== running;
+              return (
+                <>
+                  <h3 style={{ fontSize: '24px' }}>{show}</h3>
+                  {mismatch && (
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                      Running: <strong style={{ color: 'var(--text-primary)' }}>{running}</strong>
+                    </p>
+                  )}
+                </>
+              );
+            })()}
             <p>
               <span className="material-icons-round" style={{ fontSize: '16px' }}>speed</span>
               Optimal MTU Settings Enforced

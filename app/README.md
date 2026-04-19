@@ -1,24 +1,40 @@
-# Gluetun GUI
+# Gluetun-GUI — frontend (`app/`)
 
-A modern, Premium Glassmorphism control panel for your Gluetun VPN container.
+Vite + React SPA. Production build output is emitted to **`../server/public`** (see root `Dockerfile` / Vite config).
 
-## Features
-- **Real-Time Dashboard**: Monitor container stats (CPU, RAM, Upload/Download bandwidth).
-- **Settings Configurator**: Dynamically configure openvpn/wireguard settings, custom DNS blocks, and HTTP proxy rules via a unified state interface. 
-- **Docker Logs Streaming**: View the full stdout/stderr of your Gluetun container securely through the browser.
-- **Security**: fully tokenized JWT backend with access guard.
+## Prerequisites
 
-## Running Locally
+- Node 18+ (or current LTS)
+- Running **Express API** from **`../server`** on port **3000** (or set Vite proxy target if you change ports)
 
-To run the GUI during development without Docker:
+## Develop locally
 
-```powershell
-# Open powershell and execute the following from the `gui` directory:
-Start-Process node -ArgumentList "index.js" -WorkingDirectory ".\server" -WindowStyle Hidden; cd app; npm run dev
-```
+From the **repository root**:
 
-## Running with Docker (Recommended)
-You can build and run this GUI completely packaged in a Docker container using the provided `docker-compose.yml` located in the `gui` folder.
 ```bash
-docker-compose up -d --build
+cd server && node index.js &
+cd ../app && npm install && npm run dev
 ```
+
+Or two terminals: one with `node index.js` in `server/`, one with `npm run dev` in `app/`.
+
+- Dev server: Vite default **http://localhost:5173** (proxies `/api` to the backend — see `vite.config.js`).
+- Log in with the same password as **`GUI_PASSWORD`** in `gui-config.env` (default **`gluetun-admin`** if unset).
+
+## Build for production
+
+```bash
+cd app && npm install && npm run build
+```
+
+Commit or copy the generated **`server/public/`** tree as required by your deploy path.
+
+## Stack (high level)
+
+- **React Router** — `/`, `/logs`, `/network`, `/settings`, `/login`
+- **`ThemeContext`** — `data-theme` + `localStorage`
+- **`NotificationsContext`** — bell, list, toasts, prefs in `localStorage`
+- **Recharts** — Dashboard throughput
+- **date-fns** — Relative times
+
+For full system behavior (Docker, monitoring, PIA, export/import), read **`../docs/ARCHITECTURE.md`**.

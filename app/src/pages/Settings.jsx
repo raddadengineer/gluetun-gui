@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNotifications } from '../contexts/NotificationsContext';
+import { useTheme } from '../contexts/ThemeContext';
 
 export default function Settings() {
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
+  const { theme, setTheme, themes } = useTheme();
   const [config, setConfig] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -11,6 +13,7 @@ export default function Settings() {
   // GUI auth password change (never pre-filled)
   const [guiPasswordNew, setGuiPasswordNew] = useState('');
   const [guiPasswordConfirm, setGuiPasswordConfirm] = useState('');
+  const importEnvRef = useRef(null);
 
   // PIA WireGuard state
   const [piaUsername, setPiaUsername] = useState('');
@@ -22,7 +25,7 @@ export default function Settings() {
   const [piaStatus, setPiaStatus] = useState(null);
   const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [piaRegions, setPiaRegions] = useState([]);         // WireGuard regions (from PIA API)
-  const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // OpenVPN server names (gluetun servers.json)
+  const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // PIA OpenVPN region labels for Gluetun SERVER_REGIONS
 
   // Dynamic server options state
   const [serverOptions, setServerOptions] = useState({ countries: [], regions: [], cities: [], hostnames: [], server_names: [] });
@@ -150,8 +153,11 @@ export default function Settings() {
   const fetchPiaOpenVpnRegions = useCallback(async () => {
     try {
       const token = localStorage.getItem('token');
+      const portForwardGui =
+        piaPortForwarding || String(config.VPN_PORT_FORWARDING || '').toLowerCase() === 'on';
+      const pfQ = portForwardGui ? '&portForwardOnly=1' : '';
       const res = await fetch(
-        '/api/helpers/servers?provider=private%20internet%20access&vpnType=openvpn',
+        `/api/helpers/servers?provider=private%20internet%20access&vpnType=openvpn${pfQ}`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
       if (!res.ok) {
@@ -159,7 +165,7 @@ export default function Settings() {
         throw new Error(`Failed to fetch PIA OpenVPN servers (${res.status})${text ? `: ${text}` : ''}`);
       }
       const data = await res.json();
-      // Gluetun validates SERVER_REGIONS against server *names* (e.g. montreal420), not WG region ids (montreal427)
+      // Gluetun validates PIA OpenVPN SERVER_REGIONS against region labels (e.g. "DE Berlin"); legacy server_name codes are mapped on save.
       const names = [...(data.server_names || [])].filter(Boolean);
       const combined = names.length
         ? Array.from(new Set(names)).sort((a, b) => a.localeCompare(b))
@@ -171,13 +177,13 @@ export default function Settings() {
       notify({ level: 'error', title: 'PIA OpenVPN list failed', message: e.message, source: 'settings', dedupeKey: 'pia_ov_fetch' });
       setTimeout(() => setMessage(null), 5000);
     }
-  }, [notify]);
+  }, [notify, piaPortForwarding, config.VPN_PORT_FORWARDING]);
 
   useEffect(() => {
     if (config.VPN_SERVICE_PROVIDER !== 'private internet access') return;
     if ((config.VPN_TYPE || '') !== 'openvpn') return;
     fetchPiaOpenVpnRegions();
-  }, [config.VPN_SERVICE_PROVIDER, config.VPN_TYPE, fetchPiaOpenVpnRegions]);
+  }, [config.VPN_SERVICE_PROVIDER, config.VPN_TYPE, piaPortForwarding, config.VPN_PORT_FORWARDING, fetchPiaOpenVpnRegions]);
 
   useEffect(() => {
     if (!piaOpenVpnRegions.length) return;
@@ -321,6 +327,14 @@ export default function Settings() {
       PIA_USERNAME: piaUsername,
       PIA_PASSWORD: piaPassword,
     };
+    // Gluetun OpenVPN auth uses OPENVPN_* only; copy from PIA_* when OpenVPN fields are empty (same PIA login).
+    if (
+      saveData.VPN_SERVICE_PROVIDER === 'private internet access' &&
+      String(saveData.VPN_TYPE || '').toLowerCase() === 'openvpn'
+    ) {
+      if (!String(saveData.OPENVPN_USER || '').trim() && piaUsername) saveData.OPENVPN_USER = piaUsername;
+      if (!String(saveData.OPENVPN_PASSWORD || '').trim() && piaPassword) saveData.OPENVPN_PASSWORD = piaPassword;
+    }
     if (guiPasswordNew || guiPasswordConfirm) {
       if (guiPasswordNew.length < 6) {
         throw new Error('New password must be at least 6 characters.');
@@ -497,6 +511,85 @@ export default function Settings() {
     setTimeout(() => setMessage(null), 3000);
   };
 
+  const downloadConfigExport = async (redact) => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(`/api/config/export?redact=${redact ? '1' : '0'}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Export failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = redact ? 'gluetun-gui-config-redacted.env' : 'gluetun-gui-config.env';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      notify({
+        level: 'success',
+        title: 'Configuration downloaded',
+        message: redact ? 'Secrets replaced with __REDACTED__ (safe to paste).' : 'Full backup — keep this file private.',
+        source: 'settings',
+        dedupeKey: 'config_export',
+      });
+    } catch (err) {
+      notify({ level: 'error', title: 'Export failed', message: err.message, source: 'settings', dedupeKey: 'config_export_err' });
+    }
+  };
+
+  const handleImportEnvFile = async (e) => {
+    const input = e.target;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const text = await file.text();
+      if (!window.confirm(
+        'Import replaces your saved GUI configuration and recreates the Gluetun container from the file. Continue?'
+      )) {
+        return;
+      }
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/config/import', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ envText: text }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Import failed (${res.status})`);
+      }
+      notify({
+        level: 'success',
+        title: 'Configuration imported',
+        message: (data.message || `Imported ${data.keyCount != null ? data.keyCount + ' keys' : 'settings'}.`).slice(0, 220),
+        source: 'settings',
+        dedupeKey: 'config_import',
+      });
+      const cfgRes = await fetch('/api/config', { headers: { 'Authorization': `Bearer ${token}` } });
+      if (cfgRes.ok) {
+        const dataCfg = await cfgRes.json();
+        setConfig(dataCfg);
+        if (dataCfg.PIA_USERNAME) setPiaUsername(dataCfg.PIA_USERNAME);
+        if (dataCfg.PIA_PASSWORD) setPiaPassword(dataCfg.PIA_PASSWORD);
+        if (dataCfg.PIA_WG_REGIONS) setPiaWgRegionsList(dataCfg.PIA_WG_REGIONS.split(',').filter(Boolean));
+        if (dataCfg.PIA_OPENVPN_REGIONS) setPiaOpenVpnRegionsList(dataCfg.PIA_OPENVPN_REGIONS.split(',').filter(Boolean));
+        if (dataCfg.PIA_PORT_FORWARDING === 'true' || dataCfg.PIA_PORT_FORWARDING === 'on') setPiaPortForwarding(true);
+        else if (dataCfg.PIA_PORT_FORWARDING === 'false' || dataCfg.PIA_PORT_FORWARDING === 'off') setPiaPortForwarding(false);
+      }
+    } catch (err) {
+      notify({ level: 'error', title: 'Import failed', message: err.message, source: 'settings', dedupeKey: 'config_import_err' });
+    }
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
 
@@ -504,7 +597,7 @@ export default function Settings() {
         <header className="header" style={{ marginBottom: 0 }}>
           <div className="header-title">
             <h2>Settings</h2>
-            <p>Manage your entire Gluetun VPN configuration from one screen</p>
+            <p>VPN and container settings are grouped by topic; GUI-only options are under <strong style={{ fontWeight: 600 }}>This app</strong>.</p>
           </div>
         </header>
 
@@ -528,19 +621,22 @@ export default function Settings() {
 
       <div className="tabs-container">
         <button className={`tab-btn ${activeTab === 'general' ? 'active' : ''}`} onClick={() => setActiveTab('general')}>
-          <span className="material-icons-round">vpn_key</span> VPN Provider
-        </button>
-        <button className={`tab-btn ${activeTab === 'dns' ? 'active' : ''}`} onClick={() => setActiveTab('dns')}>
-          <span className="material-icons-round">security</span> DNS & Adblock
+          <span className="material-icons-round">vpn_key</span> VPN &amp; tunnel
         </button>
         <button className={`tab-btn ${activeTab === 'network' ? 'active' : ''}`} onClick={() => setActiveTab('network')}>
-          <span className="material-icons-round">router</span> Network & Ports
+          <span className="material-icons-round">router</span> Firewall &amp; ports
+        </button>
+        <button className={`tab-btn ${activeTab === 'dns' ? 'active' : ''}`} onClick={() => setActiveTab('dns')}>
+          <span className="material-icons-round">dns</span> DNS &amp; blocklists
         </button>
         <button className={`tab-btn ${activeTab === 'proxies' ? 'active' : ''}`} onClick={() => setActiveTab('proxies')}>
-          <span className="material-icons-round">cell_wifi</span> Local Proxies
+          <span className="material-icons-round">cell_wifi</span> Local proxies
+        </button>
+        <button className={`tab-btn ${activeTab === 'application' ? 'active' : ''}`} onClick={() => setActiveTab('application')}>
+          <span className="material-icons-round">widgets</span> This app
         </button>
         <button className={`tab-btn ${activeTab === 'advanced' ? 'active' : ''}`} onClick={() => setActiveTab('advanced')}>
-          <span className="material-icons-round">settings_applications</span> Advanced
+          <span className="material-icons-round">settings_applications</span> Gluetun advanced
         </button>
       </div>
 
@@ -549,6 +645,13 @@ export default function Settings() {
 
           {activeTab === 'general' && (
             <>
+              <h3 style={{ fontSize: '16px', fontWeight: 600, margin: '0 0 4px 0', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ fontSize: '20px', color: 'var(--accent-primary)' }}>cloud</span>
+                Provider &amp; protocol
+              </h3>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+                Choose who you connect through and whether Gluetun uses WireGuard or OpenVPN. Provider-specific options appear below.
+              </p>
               <div className="form-group">
                 <label>VPN Service Provider</label>
                 <select name="VPN_SERVICE_PROVIDER" value={config.VPN_SERVICE_PROVIDER || ''} onChange={handleChange} className="select-input">
@@ -759,11 +862,63 @@ export default function Settings() {
                   {config.VPN_TYPE === 'openvpn' && (
                     <>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '4px 0' }} />
-                      <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(16, 185, 129, 0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
-                        <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                          <span className="material-icons-round" style={{ color: 'var(--success)' }}>lock</span>
-                          PIA OpenVPN — uses your PIA credentials directly. Pick Gluetun <strong>server names</strong> (for example <code style={{ fontSize: '12px' }}>montreal420</code>), not WireGuard region ids such as <code style={{ fontSize: '12px' }}>montreal427</code>.
-                        </p>
+                      <div style={{
+                        padding: '14px 16px',
+                        borderRadius: '10px',
+                        background: 'rgba(16, 185, 129, 0.07)',
+                        border: '1px solid rgba(16, 185, 129, 0.22)',
+                      }}>
+                        <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start' }}>
+                          <span className="material-icons-round" style={{ color: 'var(--success)', fontSize: '24px', flexShrink: 0, lineHeight: 1 }}>lock</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.01em', marginBottom: '6px' }}>
+                              PIA OpenVPN
+                            </div>
+                            <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.55 }}>
+                              Uses the PIA username and password below. The region tags you pick are sent to Gluetun as{' '}
+                              <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>SERVER_REGIONS</code>.
+                            </p>
+                            <ul style={{
+                              margin: 0,
+                              paddingLeft: '1.1rem',
+                              fontSize: '12px',
+                              color: 'var(--text-secondary)',
+                              lineHeight: 1.55,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '6px',
+                            }}>
+                              <li>
+                                <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Choose</span>{' '}
+                                Gluetun <strong>region labels</strong> (e.g.{' '}
+                                <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>CA Montreal</code>
+                                ), not WireGuard API ids (e.g.{' '}
+                                <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>montreal427</code>
+                                ).
+                              </li>
+                              <li>
+                                <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Legacy</span>{' '}
+                                internal host tokens (e.g.{' '}
+                                <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>berlin422</code>
+                                ) are converted to the correct region on <strong style={{ fontWeight: 600 }}>load</strong> or <strong style={{ fontWeight: 600 }}>Save</strong>.
+                              </li>
+                              <li>
+                                <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Logs</span>{' '}
+                                <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>RTNETLINK answers: File exists</code>
+                                {' '}on a route add often appears when OpenVPN reconnects inside Gluetun and is usually safe to ignore if the tunnel still comes up. Repeated VPN restarts point to healthcheck or DNS issues—see the{' '}
+                                <a
+                                  href="https://github.com/qdm12/gluetun-wiki/blob/main/faq/healthcheck.md"
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ color: 'var(--accent-primary)', fontWeight: 500 }}
+                                >
+                                  Gluetun healthcheck FAQ
+                                </a>
+                                .
+                              </li>
+                            </ul>
+                          </div>
+                        </div>
                       </div>
 
                       {piaMonitoring && (
@@ -813,18 +968,22 @@ export default function Settings() {
                       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                         <div className="form-group">
                           <label>Username</label>
-                          <input type="text" name="OPENVPN_USER" value={config.OPENVPN_USER || ''} onChange={handleChange} className="text-input" placeholder="PIA Username" />
+                          <input type="text" name="OPENVPN_USER" value={config.OPENVPN_USER || ''} onChange={handleChange} className="text-input" placeholder="e.g. p1234567 (PIA login)" />
                         </div>
                         <div className="form-group">
                           <label>Password</label>
-                          <input type="password" name="OPENVPN_PASSWORD" value={config.OPENVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="PIA Password" />
+                          <input type="password" name="OPENVPN_PASSWORD" value={config.OPENVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="PIA account password" />
                         </div>
                       </div>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '-8px 0 8px 0', lineHeight: 1.45 }}>
+                        Gluetun only sees <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>OPENVPN_USER</code> / <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>OPENVPN_PASSWORD</code>.
+                        If you still have <strong style={{ fontWeight: 600 }}>PIA_USERNAME</strong> / <strong style={{ fontWeight: 600 }}>PIA_PASSWORD</strong> from WireGuard but these boxes are empty, <strong style={{ fontWeight: 600 }}>Save</strong> copies them automatically. Wrong or empty values cause <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>AUTH_FAILED</code>.
+                      </p>
 
-                      {/* OpenVPN server name tag cloud (Gluetun SERVER_REGIONS) */}
+                      {/* PIA OpenVPN regions → Gluetun SERVER_REGIONS */}
                       <div className="form-group">
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                          <label style={{ marginBottom: 0 }}>Servers — Auto-Failover Sequence
+                          <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
                             <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
                               {piaOpenVpnRegionsList.length} selected
                             </span>
@@ -868,6 +1027,11 @@ export default function Settings() {
                           <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '10px', marginBottom: 0 }}>
                             Failover order: <strong style={{ color: 'var(--success)' }}>{piaOpenVpnRegionsList.join(' ➜ ') || 'None selected'}</strong>
                           </p>
+                          {(piaPortForwarding || String(config.VPN_PORT_FORWARDING || '').toLowerCase() === 'on') && (
+                            <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '8px', marginBottom: 0, lineHeight: 1.45 }}>
+                              VPN port forwarding is on, so this list only includes regions where Gluetun marks OpenVPN servers for port forwarding (see servers.json). Many <strong style={{ fontWeight: 600 }}>US state</strong> regions have no such servers—use <strong style={{ fontWeight: 600 }}>CA</strong>/<strong style={{ fontWeight: 600 }}>EU</strong> style regions, disable port forwarding, or use <strong style={{ fontWeight: 600 }}>WireGuard</strong> if you need US + PF.
+                            </p>
+                          )}
                         </div>
                       </div>
 
@@ -910,7 +1074,12 @@ export default function Settings() {
 
                       <button
                         type="button" onClick={handleSave}
-                        disabled={saving || !config.OPENVPN_USER || !config.OPENVPN_PASSWORD || piaOpenVpnRegionsList.length === 0}
+                        disabled={
+                          saving ||
+                          piaOpenVpnRegionsList.length === 0 ||
+                          !(String(config.OPENVPN_USER || '').trim() || String(piaUsername || '').trim()) ||
+                          !(String(config.OPENVPN_PASSWORD || '').trim() || String(piaPassword || '').trim())
+                        }
                         className="btn btn-primary"
                         style={{ width: '100%', padding: '14px', fontSize: '15px', background: 'var(--success)', boxShadow: '0 4px 14px rgba(16,185,129,0.3)' }}
                       >
@@ -1182,9 +1351,12 @@ export default function Settings() {
 
           {activeTab === 'dns' && (
             <>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+                Resolver settings and hostname blocklists run inside Gluetun. Public IP logging lives under <strong style={{ fontWeight: 600 }}>Gluetun advanced</strong> with the other <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>PUBLICIP_*</code> options.
+              </p>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>dns</span>
-                DNS Configuration
+                Resolvers
               </h3>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
@@ -1213,7 +1385,7 @@ export default function Settings() {
                 </p>
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px', marginTop: '16px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px', marginTop: '16px' }}>
                 <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>DNS Caching</strong>
@@ -1231,16 +1403,6 @@ export default function Settings() {
                   </div>
                   <label className="switch">
                     <input type="checkbox" name="DNS_UPSTREAM_IPV6" checked={config.DNS_UPSTREAM_IPV6 === 'on'} onChange={handleChange} />
-                    <span className="slider"></span>
-                  </label>
-                </div>
-                <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
-                  <div className="toggle-info">
-                    <strong style={{ fontSize: '15px' }}>Public IP Check</strong>
-                    <span>Log public IP on connect</span>
-                  </div>
-                  <label className="switch">
-                    <input type="checkbox" name="PUBLICIP_ENABLED" checked={config.PUBLICIP_ENABLED !== 'false'} onChange={handleChange} />
                     <span className="slider"></span>
                   </label>
                 </div>
@@ -1317,6 +1479,9 @@ export default function Settings() {
 
           {activeTab === 'network' && (
             <>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+                Firewall rules control what can reach the container; port forwarding is for inbound services through the VPN when your provider supports it.
+              </p>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginTop: 0 }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>security</span>
                 Firewall
@@ -1419,6 +1584,9 @@ export default function Settings() {
 
           {activeTab === 'proxies' && (
             <>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+                Optional HTTP and Shadowsocks listeners on the Gluetun container so LAN clients can use the VPN without full-tunnel routing.
+              </p>
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
@@ -1532,18 +1700,38 @@ export default function Settings() {
             </>
           )}
 
-          {activeTab === 'advanced' && (
+          {activeTab === 'application' && (
             <>
-              <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '16px' }}>
-                <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>warning</span>
-                  These advanced settings control the internal Gluetun engine behavior. Only modify if you know what you're doing.
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+                These options affect this web UI only (login, notification bell, toasts). They are not passed to the Gluetun container.
+              </p>
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>palette</span>
+                Appearance
+              </h3>
+
+              <div className="form-group">
+                <label>Theme</label>
+                <select
+                  className="select-input"
+                  value={theme}
+                  onChange={(e) => setTheme(e.target.value)}
+                >
+                  {themes.map(t => (
+                    <option key={t.id} value={t.id}>{t.label}</option>
+                  ))}
+                </select>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                  Applied immediately and saved in this browser (<code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>localStorage</code>).
                 </p>
               </div>
 
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>admin_panel_settings</span>
-                GUI Security
+                GUI security
               </h3>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
@@ -1572,23 +1760,6 @@ export default function Settings() {
                     autoComplete="new-password"
                   />
                 </div>
-              </div>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
-              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>bug_report</span>
-                Logging & Debugging
-              </h3>
-              
-              <div className="form-group">
-                <label>Gluetun Log Level</label>
-                <select name="LOG_LEVEL" value={config.LOG_LEVEL || 'info'} onChange={handleChange} className="select-input">
-                  <option value="debug">Debug (Verbose)</option>
-                  <option value="info">Info</option>
-                  <option value="warn">Warn</option>
-                  <option value="error">Error</option>
-                </select>
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
@@ -1661,8 +1832,65 @@ export default function Settings() {
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>save_alt</span>
+                Backup &amp; restore
+              </h3>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0' }}>
+                Download your GUI config as <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>.env</code> text. Import applies the same pipeline as <strong style={{ fontWeight: 600 }}>Save All Changes</strong> (rewrites the GUI store and recreates Gluetun).
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '12px' }}>
+                <button type="button" className="btn" onClick={() => downloadConfigExport(true)}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>visibility_off</span>
+                  Download (redacted)
+                </button>
+                <button type="button" className="btn" onClick={() => downloadConfigExport(false)} style={{ background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.35)', color: 'var(--warning)' }}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>warning</span>
+                  Download full
+                </button>
+              </div>
+              <input
+                ref={importEnvRef}
+                type="file"
+                accept=".env,.txt,text/plain"
+                style={{ display: 'none' }}
+                onChange={handleImportEnvFile}
+              />
+              <button type="button" className="btn btn-primary" onClick={() => importEnvRef.current?.click()}>
+                <span className="material-icons-round" style={{ fontSize: '18px' }}>upload_file</span>
+                Import from file…
+              </button>
+            </>
+          )}
+
+          {activeTab === 'advanced' && (
+            <>
+              <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '16px' }}>
+                <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>warning</span>
+                  Low-level Gluetun container options. GUI login and notification preferences are under <strong style={{ fontWeight: 600 }}>This app</strong>.
+                </p>
+              </div>
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>bug_report</span>
+                Logging &amp; debugging
+              </h3>
+              
+              <div className="form-group">
+                <label>Gluetun Log Level</label>
+                <select name="LOG_LEVEL" value={config.LOG_LEVEL || 'info'} onChange={handleChange} className="select-input">
+                  <option value="debug">Debug (Verbose)</option>
+                  <option value="info">Info</option>
+                  <option value="warn">Warn</option>
+                  <option value="error">Error</option>
+                </select>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>monitor_heart</span>
-                Health Check
+                Health check
               </h3>
 
               <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
@@ -1728,8 +1956,19 @@ export default function Settings() {
               
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>settings</span>
-                System & Identity
+                System &amp; identity
               </h3>
+
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '16px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '15px' }}>Public IP check</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Log and track public IP on connect (uses PUBLICIP_* settings below)</span>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" name="PUBLICIP_ENABLED" checked={config.PUBLICIP_ENABLED !== 'false'} onChange={handleChange} />
+                  <span className="slider"></span>
+                </label>
+              </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '24px' }}>
                 <div className="form-group">

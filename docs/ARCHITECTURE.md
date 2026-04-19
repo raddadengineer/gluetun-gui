@@ -1,173 +1,181 @@
-# Architecture & Data Flow
+# Architecture & data flow
 
-This document explains how **Gluetun-GUI** works end-to-end: containers, persistence, API surface, and the main runtime flows (save config, generate WireGuard keys, monitoring, and auto-failover).
+This document describes **Gluetun-GUI**: containers, persistence, API routes, and main flows (settings, PIA WireGuard/OpenVPN, monitoring, failover, backup).
 
-## High-level topology
+## Topology
 
 ```mermaid
 flowchart LR
-  U[Browser UI<br/>React (Vite build)] -->|REST / SSE<br/>Bearer JWT| API[gluetun-gui<br/>Express API :3000]
+  U[Browser UI<br/>React (Vite)] -->|REST / SSE<br/>Bearer JWT| API[gluetun-gui<br/>Express :3000]
 
-  subgraph GUI_DATA[Persistent data (DATA_DIR)]
-    ENV[gui-config.env<br/>GUI source-of-truth]
+  subgraph GUI_DATA[Persistent data DATA_DIR]
+    ENV[gui-config.env<br/>GUI source of truth]
     SESS[sessions.json<br/>session history]
-    WG[wireguard/wg0.conf<br/>generated WG config]
-    GLU[gluetun.env<br/>flat env backup]
+    WG[wireguard/wg0.conf<br/>PIA WG output]
+    GLU[gluetun.env<br/>last Gluetun env backup]
   end
 
   API <-->|read/write| GUI_DATA
-  API -->|Docker API via socket| DOCKER[(docker.sock)]
-  DOCKER --> G[gluetun<br/>qmcgaw/gluetun]
-  API -->|Docker stats / inspect / logs| G
+  API -->|Docker API| DOCKER[(docker.sock)]
+  DOCKER --> G[gluetun engine<br/>qmcgaw/gluetun]
+  API -->|stats / inspect / logs / exec| G
 
   G -->|VPN tunnel| NET[(Internet)]
 ```
 
 ## Components
 
-- **UI (`app/`)**
-  - React pages call the Express backend under `/api/*`.
-  - Authentication is a JWT stored in `localStorage` and sent as `Authorization: Bearer <token>`.
-  - Logs are streamed via Server-Sent Events (SSE) from `/api/logs`.
+| Layer | Role |
+|--------|------|
+| **UI (`app/`)** | React (Vite). JWT in `localStorage`. Themes and notification prefs in `localStorage`. SSE for `/api/logs`. |
+| **API (`server/index.js`)** | Express: config, Docker lifecycle, PIA automation, sessions, monitoring loop, static SPA in production. |
+| **Engine container** | Resolved as `findGluetunEngineContainer()`: prefers name `/gluetun`, else first `gluetun` name not containing `gui`. Metrics, status, and monitor target this container. |
 
-- **API (`server/index.js`)**
-  - Reads/writes the GUI configuration, recreates the Gluetun container, runs PIA WireGuard generation, maintains session history, and runs a background monitor.
-  - Uses Docker socket access (via `dockerode`) to inspect/recreate containers and stream logs.
+### Persistence (`DATA_DIR` or legacy paths)
 
-- **Persistence (`DATA_DIR`)**
-  - `gui-config.env`: **authoritative GUI config** (what you see in Settings).
-  - `gluetun.env`: a **flat backup** of the last applied Gluetun env values.
-  - `wireguard/wg0.conf`: last generated PIA WG config (used for parsing keys, endpoint, server name).
-  - `sessions.json`: session history (bandwidth deltas and metadata).
+| File | Purpose |
+|------|---------|
+| `gui-config.env` | Authoritative settings from the UI (and secrets such as `GUI_PASSWORD`, PIA creds). |
+| `gluetun.env` | Flat backup of the last env passed into Gluetun on recreate. |
+| `wireguard/wg0.conf` | Last PIA WireGuard file from `pia-wg-config` (parsed for keys, endpoint, `SERVER_NAMES`). |
+| `sessions.json` | VPN session history (bandwidth, metadata). |
 
-## Authentication flow
+## Authentication
 
 ```mermaid
 sequenceDiagram
-  autonumber
-  participant UI as Browser UI
-  participant API as Express API
+  participant UI as Browser
+  participant API as Express
 
   UI->>API: POST /api/login { password }
-  alt password matches GUI_PASSWORD (or default)
-    API-->>UI: { token }
-    UI->>UI: store token in localStorage
-  else invalid password
-    API-->>UI: 401
-  end
-
-  UI->>API: GET /api/status (Authorization: Bearer token)
-  API-->>UI: container status + session + displayProvider
+  API-->>UI: { token } JWT 24h
+  Note over UI: token in localStorage
+  UI->>API: GET /api/* Authorization Bearer
 ```
 
-## Config save → apply to Gluetun
+Password source: `GUI_PASSWORD` in `gui-config.env`, default `gluetun-admin`. Change under **Settings → This app → GUI security**.
 
-**Goal:** user edits Settings → presses Save → the GUI persists config and immediately applies it to the running Gluetun container.
+## Settings layout (tabs)
+
+| Tab | Scope |
+|-----|--------|
+| **VPN & tunnel** | Provider, `VPN_TYPE`, PIA WireGuard / PIA OpenVPN panels, or generic provider server filters + WireGuard/OpenVPN fields. |
+| **Firewall & ports** | `FIREWALL_*`, VPN port forwarding (`VPN_PORT_FORWARDING_*`). |
+| **DNS & blocklists** | Resolvers, blocklists, DNS toggles. Public IP logging is under **Gluetun advanced** (`PUBLICIP_*`). |
+| **Local proxies** | Shadowsocks, HTTP proxy. |
+| **This app** | Theme, GUI password, notifications, **config export/import** (browser only; not sent to Gluetun as env). |
+| **Gluetun advanced** | Log level, health check, updater, system/identity (`TZ`, `PUBLICIP_ENABLED`, …), VPN hooks. |
+
+## Config save → Gluetun
 
 ```mermaid
 sequenceDiagram
-  autonumber
-  participant UI as Settings UI
-  participant API as Express API
-  participant D as Docker Engine
-  participant G as Gluetun container
+  participant UI as Settings
+  participant API as Express
+  participant D as Docker
+  participant G as Gluetun
 
-  UI->>API: POST /api/config (full settings payload)
-  API->>API: write DATA_DIR/gui-config.env
-  API->>API: sanitize & map env keys (drop GUI-only, map booleans, migrate deprecated vars)
-  API->>API: write DATA_DIR/gluetun.env (backup)
-  API->>D: inspect Gluetun container (image/env/hostconfig)
-  API->>D: stop + remove old container
-  API->>D: create container with merged env
-  API->>D: start new container
-  API-->>UI: 200 Settings saved + container recreated
+  UI->>API: POST /api/config (JSON body)
+  API->>API: applyGuiConfiguration()
+  Note over API: PIA OpenVPN: sanitize PIA_OPENVPN_REGIONS vs servers.json; strip stale SERVER_*; copy PIA_* to OPENVPN_* if needed
+  API->>API: write gui-config.env
+  API->>API: build gluetun env (GUI-only keys removed, booleans on/off, WG custom mapping for PIA)
+  API->>API: write gluetun.env
+  API->>D: stop/remove engine + create/start merged env
+  API-->>UI: 200 + message
 ```
 
-### Why “GUI provider” and “container provider” can differ
+**`applyGuiConfiguration`** is also used by **`POST /api/config/import`** (same pipeline as Save).
 
-For **PIA WireGuard**, the GUI stores `VPN_SERVICE_PROVIDER=private internet access`, but Gluetun must run with `VPN_SERVICE_PROVIDER=custom` (because the GUI injects explicit WireGuard keys/endpoints). The Dashboard therefore uses the GUI config as the user-facing provider label.
+### PIA WireGuard vs container `VPN_SERVICE_PROVIDER`
 
-## PIA WireGuard “Generate Keys & Connect”
+For **PIA WireGuard**, the GUI keeps `VPN_SERVICE_PROVIDER=private internet access` in `gui-config.env`, but Gluetun runs with **`custom`** and explicit `WIREGUARD_*` + optional `SERVER_NAMES`. The Dashboard uses **`/api/status`** fields `displayProvider` / `gui.VPN_SERVICE_PROVIDER` for the label.
 
-**Goal:** generate a fresh WireGuard config from PIA’s API, update GUI config + Gluetun env, and restart Gluetun to connect.
+### PIA OpenVPN (Gluetun region labels)
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant UI as Settings UI
-  participant API as Express API
-  participant D as Docker Engine
-  participant G as Gluetun container
+- Gluetun validates **`SERVER_REGIONS`** against **human-readable region labels** from `servers.json` (e.g. `DE Berlin`, `DE Germany Streaming Optimized`), **not** internal `server_name` host tokens (e.g. `berlin422`).
+- The GUI stores **`PIA_OPENVPN_REGIONS`** as those labels (comma-separated failover). Legacy configs may still list `server_name` tokens; **`sanitizePiaOpenVpnServerSelection`** maps aliases → region via **`getPiaOpenVpnAliasToRegionMap`**.
+- **`GET /api/helpers/servers`** (PIA + OpenVPN) returns **`server_names`** populated with sorted **unique regions** so the tag cloud matches what Gluetun expects. With **`portForwardOnly=1`**, only regions that have at least one OpenVPN server with **`port_forward: true`** in `servers.json` are returned (matches Gluetun’s “port forwarding only” filter; many US state regions are omitted).
+- On save/import, invalid tokens are dropped; generic **`SERVER_*`** keys are removed for PIA+OpenVPN so WireGuard-style ids cannot leak into the container.
+- **`OPENVPN_USER` / `OPENVPN_PASSWORD`**: if empty but **`PIA_USERNAME` / `PIA_PASSWORD`** are set, they are copied before writing env (Gluetun does not read `PIA_*` for OpenVPN auth).
 
-  UI->>API: POST /api/config (save current settings)
-  API-->>UI: 200 saved
+## PIA WireGuard: Generate keys & connect
 
-  UI->>API: POST /api/pia/generate (PIA creds + regions + PF toggle)
-  API->>API: run pia-wg-config -> DATA_DIR/wireguard/wg0.conf
-  API->>API: parse wg0.conf -> private key, address, endpoint, server name
-  API->>API: write DATA_DIR/gluetun.env (WireGuard vars backup)
-  API->>API: write DATA_DIR/gui-config.env (persist creds/regions/PF/index/server name)
-  API->>D: stop/remove old Gluetun + create/start new one with WireGuard env
-  API-->>UI: 200 generated + restarted
-```
+1. `POST /api/config` (save current form).
+2. `POST /api/pia/generate` → runs `pia-wg-config`, parses `wg0.conf`, updates env files, recreates Gluetun with WireGuard + optional `SERVER_NAMES` for PF.
 
-## Monitoring & auto-failover (PIA)
+## Monitoring & failover
 
-The API runs a background loop (delayed start) that:
+Background **`checkVPN`** (starts after a short delay):
 
-- Checks connectivity using:
-  - Gluetun control server `/v1/publicip/ip` **if available**, otherwise
-  - a fallback external request (`api.ipify.org`) so monitoring works even when the control server is auth-protected.
-- If PIA port-forwarding is enabled:
-  - tries control server `/v1/portforward`,
-  - falls back to reading `/tmp/gluetun/forwarded_port` inside the container.
-- If failures exceed thresholds, it rotates regions (if you selected more than one).
+1. Resolves the **engine** container (not the GUI container).
+2. **Warm-up**: no connectivity failure counted while container age &lt; **120s** for **OpenVPN**, **25s** for **WireGuard** (tunnel/DNS/TLS need time).
+3. **Public IP / connectivity** via **`execResolvePublicIp`** inside the container:
+   - `http://127.0.0.1:8000/v1/publicip/ip` (Gluetun control server),
+   - then `https://api.ipify.org?format=json`,
+   - then plain **HTTP** `ipv4.icanhazip.com` or `checkip.amazonaws.com` (helps during OpenVPN bring-up when HTTPS is flaky).
+4. Docker **`exec`** stdout is **demuxed** (multiplexed stream) before parsing JSON/text.
+5. **PIA port forwarding** (if enabled in GUI env): control `/v1/portforward`, else read **`/tmp/gluetun/forwarded_port`**.
+6. If **`failCount`** or **`pfFailCount`** ≥ **3**, runs **`executeFailoverRotation`**:
+   - **WireGuard**: `pia-wg-config` for next region from `PIA_WG_REGIONS` / `PIA_REGIONS`.
+   - **OpenVPN (PIA)**: next entry from **`PIA_OPENVPN_REGIONS` only**, resolved to a region label before applying **`SERVER_REGIONS`**.
+
+Intervals: **`CHECK_INTERVAL`** (1 min) when unhealthy signals, **`HEALTHY_INTERVAL`** (15 min) when healthy.
 
 ```mermaid
 flowchart TD
-  A[Timer tick] --> B{Gluetun running?}
-  B -- no --> T[wait CHECK_INTERVAL]
-  B -- yes --> C[Get public IP<br/>control server -> fallback ipify]
-  C --> D{connected?}
-  D -- no --> F[failCount++]
-  D -- yes --> G[failCount=0]
-
-  G --> H{PIA PF enabled?}
-  H -- no --> N[next tick]
-  H -- yes --> I[Get PF port<br/>control server -> status file]
-  I --> J{port found?}
-  J -- no --> K[pfFailCount++]
-  J -- yes --> L[pfFailCount=0<br/>cache lastForwardedPort]
-
-  F --> M{failCount>=3 or pfFailCount>=3}
-  K --> M
-  M -- yes --> R[executeFailoverRotation]
-  M -- no --> N
-  R --> N
+  T[Timer] --> R{Engine running?}
+  R -- no --> W[wait]
+  R -- yes --> U{Warm-up by VPN_TYPE?}
+  U -- yes --> W
+  U -- no --> P[execResolvePublicIp]
+  P --> C{OK?}
+  C -- yes --> Z[failCount=0]
+  C -- no --> F[failCount++]
+  F --> X{failCount>=3?}
+  X -- yes --> ROT[executeFailoverRotation]
+  X -- no --> W
 ```
 
-### Failover rotation logic
-
-- Loads GUI config from `gui-config.env`.
-- Computes the active region list:
-  - WireGuard: `PIA_WG_REGIONS` (or `PIA_REGIONS` fallback)
-  - OpenVPN: `PIA_OPENVPN_REGIONS` (or `PIA_REGIONS` fallback)
-- Advances `PIA_REGION_INDEX` and persists it.
-- For WireGuard, regenerates using `pia-wg-config` for the next region.
-- For OpenVPN (PIA), applies `SERVER_REGIONS=<next region>` and recreates container.
-
-## API surface (main routes)
+## Backup & restore (homelab)
 
 | Route | Method | Purpose |
-|------|--------|---------|
-| `/api/login` | POST | Authenticate and get JWT |
-| `/api/status` | GET | Gluetun container status + session + GUI display provider |
-| `/api/metrics` | GET | Docker stats for Gluetun (CPU/RAM/network) |
-| `/api/config` | GET/POST | Read/write GUI config and apply to Gluetun |
-| `/api/logs` | GET (SSE) | Multiplexed logs: Gluetun + GUI |
-| `/api/sessions` | GET/DELETE | Session history |
-| `/api/pia/regions` | GET | PIA WireGuard region list (proxy) |
-| `/api/pia/generate` | POST | Generate WG config from PIA and reconnect |
-| `/api/pia/monitoring` | GET | Monitor snapshot (fail counts + PF port) |
-| `/api/test-failover` | POST | Manually trigger region rotation |
+|-------|--------|---------|
+| `/api/config/export?redact=1` | GET | Download `gui-config.env`; secrets → `__REDACTED__`. |
+| `/api/config/export` | GET | Full backup (sensitive). |
+| `/api/config/import` | POST | `{ "envText": "KEY=value\\n..." }` — parse, **`applyGuiConfiguration`**, recreate Gluetun. |
 
+## Other API routes
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/login` | POST | JWT |
+| `/api/status` | GET | Engine status, `env[]`, **`image`**, **`imageId`**, **`containerName`**, session, **`gui`** (`VPN_SERVICE_PROVIDER`, `VPN_TYPE`, …), **`displayProvider`** |
+| `/api/metrics` | GET | Docker stats (engine container) |
+| `/api/config` | GET / POST | Read JSON config / save + recreate |
+| `/api/logs` | GET (SSE) | Multiplexed Gluetun + GUI logs (`?token=` allowed) |
+| `/api/sessions` | GET / DELETE | Session history |
+| `/api/restart` | POST | Restart engine |
+| `/api/stop` | POST | Stop engine |
+| `/api/pia/regions` | GET | PIA WireGuard regions (PIA API proxy) |
+| `/api/pia/status` | GET | Last generate status |
+| `/api/pia/generate` | POST | PIA WireGuard generate |
+| `/api/pia/monitoring` | GET | Snapshot: `failCount`, `pfFailCount`, `connected`, `publicIp`, `port`, `checkInterval`, … |
+| `/api/test-failover` | POST | Manual failover rotation |
+| `/api/vpn/connectivity-test` | POST | One-shot **`execResolvePublicIp`** (does not advance monitor counters) |
+| `/api/helpers/servers` | GET | Gluetun `servers.json` (and PIA WG special-case); query `provider`, `vpnType`, optional `country` / `region` filters |
+
+## In-app notifications (client only)
+
+- **`NotificationsProvider`**: list, dedupe, `localStorage` prefs (`enabled`, per-`source`, per-level `toasts`).
+- **Sources**: `settings`, `dashboard`, `monitor`, `logs`.
+- Not persisted on server; no Gluetun env vars.
+
+## Themes
+
+- **`ThemeContext`**: `data-theme` on `<html>`, persisted in `localStorage`.
+- Configured under **Settings → This app → Appearance**.
+
+## Static production build
+
+Express serves **`server/public`** (Vite `app` build output). Requests under **`/api/*`** must not be swallowed by the SPA fallback middleware.

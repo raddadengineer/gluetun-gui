@@ -522,6 +522,7 @@ input:checked+.slider:before {
 /* Tab Navigation */
 .tabs-container {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   background: var(--glass-bg);
   padding: 8px;
@@ -531,7 +532,8 @@ input:checked+.slider:before {
 }
 
 .tab-btn {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: min(140px, 100%);
   padding: 12px;
   background: transparent;
   border: none;

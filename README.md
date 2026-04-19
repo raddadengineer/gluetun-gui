@@ -1,34 +1,38 @@
 # Gluetun-GUI
 
-A beautiful, responsive, and data-driven graphical interface for managing your [Gluetun](https://github.com/qdm12/gluetun) VPN container. Built with React, Vite, and Express, this GUI allows you to monitor network traffic in real-time, configure settings across all major VPN providers, and manage your VPN tunnel directly from your browser.
+A responsive, data-driven web UI for managing a [**Gluetun**](https://github.com/qdm12/gluetun) VPN container. Built with **React**, **Vite**, and **Express**, it runs beside Gluetun (or on the same host), talks to **Docker**, and keeps configuration in a small set of files under **`DATA_DIR`**.
 
 ## Features
 
-- **Real-Time Dashboard** — Monitor CPU/RAM usage, network throughput, and connection status with live-updating charts
-- **Network Monitor** — Dedicated page with VPN tunnel vs LAN traffic split, per-interface breakdowns, and peak speed tracking
-- **Session History** — Automatic per-session bandwidth tracking across restarts, with per-interface (VPN/LAN) breakdown
-- **Auto-Failover (PIA)** — Multi-region WireGuard auto-failover with automatic key generation, port-forwarding, and background session renewal
-- **Multiplexed Logs** — Real-time aggregated logs from both the Gluetun engine and the GUI, with search, severity coloring, and debug toggle
-- **Full Settings Management** — 100% parity with the official Gluetun Wiki. Configure DNS over TLS, Adblock, Shadowsocks, HTTP proxies, kill switches, firewall, port forwarding, advanced OpenVPN/WireGuard parameters, and more natively from the browser.
-- **Docker Integrated** — Leverages the Docker socket to interact directly with the Gluetun container for instant config deployments without manual intervention.
+- **Dashboard** — Connection state, provider label (GUI vs container), protocol, CPU/RAM, throughput chart, Gluetun **image / digest**, PIA monitoring (connectivity + port forward). Quick actions: restart, **test VPN connectivity**, test failover, stop.
+- **Network** — Tunnel vs LAN traffic, per-interface stats, session peaks.
+- **Session history** — Bandwidth and metadata across container restarts (`sessions.json`).
+- **Logs** — SSE multiplex of Gluetun + GUI process logs; filter and severity styling (theme-aware).
+- **Settings** — Tabbed editor aligned with Gluetun env vars:
+  - **VPN & tunnel** — Provider, WireGuard/OpenVPN, **PIA** WireGuard (regions, generate keys) or **PIA OpenVPN** (Gluetun **region labels** for `SERVER_REGIONS`, not WireGuard region IDs), generic providers with server filters.
+  - **Firewall & ports** — Local subnets, input ports, VPN port forwarding.
+  - **DNS & blocklists** — Resolvers, filtering toggles, blocklists.
+  - **Local proxies** — Shadowsocks, HTTP proxy.
+  - **This app** — **Theme**, **GUI password**, **notifications** (bell + toasts), **backup/export/import** of `gui-config.env`.
+  - **Gluetun advanced** — Logging, health check, updater, system/public IP options, VPN hooks.
+- **PIA automation** — WireGuard via `pia-wg-config`; multi-region **auto-failover** and optional port forwarding; OpenVPN uses Gluetun’s PIA **region** list (legacy internal host codes are mapped to regions on save).
+- **Notifications** — In-app bell, deduped events (save, monitor, dashboard actions, log warnings), configurable sources and toast levels (`localStorage`).
+- **Themes** — Multiple readable themes (`localStorage`).
+- **Docker** — Recreate Gluetun with merged env on every save/import; engine container resolved reliably (name `gluetun`, not `gluetun-gui`).
 
-## Quick Start
+Full diagrams and route tables: **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
+
+## Quick start
 
 ```bash
-# 1. Create a project directory
 mkdir gluetun-vpn && cd gluetun-vpn
-
-# 2. Create the persistent data directory
 mkdir data
-
-# 3. Create docker-compose.yml (see below) and start
+# Add docker-compose.yml (below), then:
 docker compose up -d
-
-# 4. Open http://localhost:3000
-#    Default password: gluetun-admin
+# Open http://localhost:3000 — default password: gluetun-admin
 ```
 
-### docker-compose.yml
+### `docker-compose.yml` (example)
 
 ```yaml
 services:
@@ -40,9 +44,9 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - "8888:8888/tcp"  # HTTP proxy
-      - "8388:8388/tcp"  # Shadowsocks
-      - "8388:8388/udp"  # Shadowsocks
+      - "8888:8888/tcp"
+      - "8388:8388/tcp"
+      - "8388:8388/udp"
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
@@ -59,67 +63,30 @@ services:
       - gluetun
 ```
 
-> **Note:** No `env_file` or `gluetun.env` is needed. The GUI manages Gluetun's environment variables dynamically via the Docker API. Just configure everything through the web UI on first run.
+Rebuild the **GUI** image after pulling or changing this repo so the server and static UI match.
 
-## Architecture
+## Architecture (short)
 
-```text
-┌─────────────────────────────────────────────────┐
-│  Browser (port 3000)                            │
-│  ┌──────────┐ ┌──────┐ ┌─────────┐ ┌────────┐  │
-│  │Dashboard │ │ Logs │ │ Network │ │Settings│  │
-│  └──────────┘ └──────┘ └─────────┘ └────────┘  │
-└──────────────────┬──────────────────────────────┘
-                   │ REST / SSE
-┌──────────────────▼──────────────────────────────┐
-│  gluetun-gui container                          │
-│  Express.js backend                             │
-│  ├── /api/status   — container state            │
-│  ├── /api/metrics  — live Docker stats          │
-│  ├── /api/config   — read/write GUI config      │
-│  ├── /api/sessions — session history            │
-│  ├── /api/logs     — multiplexed SSE stream     │
-│  └── /api/pia/*    — PIA WireGuard automation   │
-│                                                 │
-│  Persistent data (/data):                       │
-│  ├── gui-config.env   — all GUI settings        │
-│  ├── gluetun.env      — last Gluetun env backup │
-│  ├── sessions.json    — session history         │
-│  └── wireguard/       — generated WG configs    │
-└──────────────────┬──────────────────────────────┘
-                   │ Docker Socket
-┌──────────────────▼──────────────────────────────┐
-│  gluetun container (qmcgaw/gluetun)             │
-│  VPN tunnel • Firewall • DNS • Proxies          │
-└─────────────────────────────────────────────────┘
+```
+Browser :3000  →  JWT REST + SSE  →  gluetun-gui (Express)
+                         ↓
+              gui-config.env, gluetun.env, sessions.json, wireguard/
+                         ↓
+                 Docker API (socket)  →  gluetun (VPN)
 ```
 
-For a full end-to-end walkthrough (including monitoring/failover and port forwarding), see:
+- **Single source of truth:** `DATA_DIR/gui-config.env` (or legacy `server/.env` if `DATA_DIR` unset).
+- **Apply:** Save or import writes that file, writes `gluetun.env` backup, **stops/removes/creates** the Gluetun container with merged environment (no separate `env_file` required for Gluetun).
 
-- `docs/ARCHITECTURE.md`
+## Password & backup
 
-### How Configuration Works
+- Change **`GUI_PASSWORD`** under **Settings → This app**, or edit `gui-config.env`.
+- **Export / import** (same tab): download `.env` (optional redacted import-safe copy); import replaces saved config and recreates Gluetun — confirm in the UI.
 
-1. **GUI is the single source of truth.** All settings are stored in `data/gui-config.env`.
-2. When you save settings, the GUI:
-   - Writes the config to `data/gui-config.env` (persistence)
-   - Writes Gluetun-specific vars to `data/gluetun.env` (backup)
-   - Recreates the Gluetun container via Docker API with the new environment
-3. **No shared env files.** Gluetun doesn't read from disk — the GUI injects env vars directly into the container on every config change.
+## Legacy migration
 
-### Changing the Password
+If older layouts used `server/.env` or `sessions.json` next to the server only, enabling **`DATA_DIR`** migrates those files into `./data` on first start.
 
-Add to `data/gui-config.env`:
-```
-GUI_PASSWORD=your_new_password
-```
+## Supported providers (Gluetun)
 
-Or set it through the Settings page (under Advanced).
-
-## Upgrading from Legacy Setup
-
-If you previously used `gluetun.env` and `gui-settings.env` bind-mounts, the server will automatically migrate your files into the new `data/` directory on first start. No data is lost.
-
-## Supported VPN Providers
-
-AirVPN · CyberGhost · ExpressVPN · FastestVPN · Giganews · HideMyAss · IPVanish · IVPN · Mullvad · NordVPN · Perfect Privacy · Privado · Private Internet Access · PrivateVPN · ProtonVPN · PureVPN · SlickVPN · Surfshark · TorGuard · VPN Secure · VPN Unlimited · Vyprvpn · Windscribe · Custom (OpenVPN/WireGuard)
+AirVPN · CyberGhost · ExpressVPN · FastestVPN · Giganews · HideMyAss · IPVanish · IVPN · Mullvad · NordVPN · Perfect Privacy · Privado · **Private Internet Access** · PrivateVPN · ProtonVPN · PureVPN · SlickVPN · Surfshark · TorGuard · VPN Secure · VPN Unlimited · Vyprvpn · Windscribe · **Custom** (OpenVPN / WireGuard).
