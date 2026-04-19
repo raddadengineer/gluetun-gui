@@ -1399,7 +1399,7 @@ export default function Settings() {
                 <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
                   <div className="toggle-info">
                     <strong style={{ fontSize: '15px' }}>IPv6 DNS</strong>
-                    <span>Enable DNS IPv6 resolution</span>
+                    <span>Enable DNS IPv6 resolution (<code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>DNS_UPSTREAM_IPV6</code>). Mirrored under Firewall &amp; ports → IPv6.</span>
                   </div>
                   <label className="switch">
                     <input type="checkbox" name="DNS_UPSTREAM_IPV6" checked={config.DNS_UPSTREAM_IPV6 === 'on'} onChange={handleChange} />
@@ -1517,6 +1517,19 @@ export default function Settings() {
                   <option value="warn">Warn</option>
                   <option value="error">Error</option>
                 </select>
+              </div>
+
+              <div className="toggle-switch-container" style={{ padding: '16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '15px' }}>IPv6</strong>
+                  <span>
+                    Turns IPv6 on or off for Gluetun’s <strong style={{ fontWeight: 600 }}>DNS upstream</strong> connections (<code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>DNS_UPSTREAM_IPV6</code>). Same as <strong style={{ fontWeight: 600 }}>IPv6 DNS</strong> on the DNS tab. For stack-wide IPv6 in the container, use Docker <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>sysctls</code> (see Gluetun wiki).
+                  </span>
+                </div>
+                <label className="switch">
+                  <input type="checkbox" name="DNS_UPSTREAM_IPV6" checked={config.DNS_UPSTREAM_IPV6 === 'on'} onChange={handleChange} />
+                  <span className="slider"></span>
+                </label>
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
