@@ -31,11 +31,27 @@ Full diagrams and route tables: **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 mkdir gluetun-vpn && cd gluetun-vpn
 mkdir data
 # Add docker-compose.yml (below), then:
+docker compose pull
 docker compose up -d
 # Open http://localhost:3000 and sign in with password: gluetun-admin (default until changed)
 ```
 
+## Docker
+
+| Role | Image | Registry |
+| --- | --- | --- |
+| **GUI** (this app) | `raddadengineer/gluetun-gui:latest` | [Docker Hub — `raddadengineer/gluetun-gui`](https://hub.docker.com/r/raddadengineer/gluetun-gui) |
+| **VPN engine** (Gluetun) | `qmcgaw/gluetun:latest` | [Docker Hub — `qmcgaw/gluetun`](https://hub.docker.com/r/qmcgaw/gluetun) |
+
+**Pulls (GUI image):** total pulls from Docker Hub are shown on this badge (updates when GitHub renders the README):
+
+[![Docker Pulls](https://img.shields.io/docker/pulls/raddadengineer/gluetun-gui)](https://hub.docker.com/r/raddadengineer/gluetun-gui)
+
+To refresh local images before starting: `docker compose pull` (or `docker pull raddadengineer/gluetun-gui:latest` / `docker pull qmcgaw/gluetun:latest`).
+
 ### `docker-compose.yml` (example)
+
+This matches the layout in the repo’s [`docker-compose.yml`](docker-compose.yml) (minimal Gluetun ports; extend as needed).
 
 ```yaml
 services:
@@ -47,9 +63,10 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - "8888:8888/tcp"
-      - "8388:8388/tcp"
-      - "8388:8388/udp"
+      - "8888:8888/tcp" # HTTP proxy
+      - "8388:8388/tcp" # Shadowsocks
+      - "8388:8388/udp" # Shadowsocks
+    # No env_file — the GUI writes Gluetun env via Docker API; configure VPN on first visit (port 3000).
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
@@ -62,11 +79,12 @@ services:
       - ./data:/data
     environment:
       - DATA_DIR=/data
+      # Optional: JWT_SECRET=..., JWT_EXPIRES_IN=24h
     depends_on:
       - gluetun
 ```
 
-Rebuild the **GUI** image after pulling or changing this repo so the server and static UI match.
+Rebuild the **GUI** image yourself only when developing from this repo (`docker build`); for published releases, **`docker compose pull`** keeps the Hub image current.
 
 ## Architecture (short)
 
