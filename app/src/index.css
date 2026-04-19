@@ -166,6 +166,11 @@ body {
 }
 
 /* Layout */
+.sidebar-host {
+  flex-shrink: 0;
+  position: relative;
+}
+
 .sidebar {
   width: 280px;
   padding: 32px 24px;
@@ -174,6 +179,124 @@ body {
   flex-direction: column;
   background: var(--sidebar-bg);
   backdrop-filter: blur(20px);
+}
+
+.sidebar-drawer-header {
+  display: none;
+}
+
+/* Floating menu (narrow screens + desktop collapsed sidebar) */
+.sidebar-floating-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  z-index: 3000;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  color: var(--text-primary);
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.sidebar-floating-toggle .material-icons-round {
+  font-size: 24px;
+}
+
+.sidebar-floating-toggle:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 2990;
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+
+.sidebar-backdrop.sidebar-backdrop-visible {
+  display: block;
+  animation: sidebarFadeIn 0.2s ease;
+}
+
+.sidebar-desktop-collapse-row {
+  display: none;
+}
+
+@media (min-width: 901px) {
+  .sidebar-desktop-collapse-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: -8px 0 12px 0;
+  }
+}
+
+.sidebar-collapse-desktop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sidebar-collapse-desktop:hover {
+  color: var(--text-primary);
+  border-color: var(--glass-highlight);
+}
+
+.sidebar-collapse-desktop-label {
+  font-weight: 500;
+}
+
+/* Drawer layout (mobile open or desktop collapsed + open) */
+.sidebar--drawer-mode .brand {
+  display: none !important;
+}
+
+.sidebar--drawer-mode .sidebar-drawer-header {
+  display: flex !important;
+  align-items: center;
+  gap: 10px;
+  margin: -8px 0 0 0;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--glass-border);
+}
+
+.sidebar--drawer-mode .sidebar-drawer-close {
+  display: flex !important;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.sidebar--drawer-mode .sidebar-drawer-close:hover {
+  background: var(--glass-bg);
+  color: var(--text-primary);
 }
 
 .brand {
@@ -202,6 +325,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .nav-item {
@@ -705,6 +831,11 @@ input:checked+.slider:before {
   to   { transform: rotate(360deg); }
 }
 
+@keyframes sidebarFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 .custom-scrollbar::-webkit-scrollbar {
   width: 4px;
   height: 4px;
@@ -718,4 +849,135 @@ input:checked+.slider:before {
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: var(--glass-highlight);
+}
+
+/* Narrow / mobile layout */
+@media (max-width: 900px) {
+  .layout {
+    flex-direction: row !important;
+    position: relative;
+    align-items: stretch;
+  }
+
+  /* Off-canvas sidebar: host takes no flex width; drawer floats above content */
+  .sidebar-host {
+    flex: 0 0 0 !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    align-self: stretch;
+  }
+
+  .sidebar-host .sidebar-floating-toggle {
+    display: flex !important;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 2995;
+    width: min(300px, 88vw);
+    max-width: 300px;
+    transform: translateX(-105%);
+    transition: transform 0.25s ease;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.35);
+    border-right: 1px solid var(--glass-border);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar.sidebar--open {
+    transform: translateX(0);
+  }
+
+  .sidebar .brand {
+    display: none !important;
+  }
+
+  .main-content {
+    width: 100% !important;
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    padding: 56px 14px 24px 14px !important;
+  }
+
+  .tabs-container {
+    flex-wrap: wrap !important;
+    gap: 6px !important;
+  }
+
+  .tab-btn {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    font-size: 12px !important;
+    padding: 8px 10px !important;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .settings-search-bar {
+    flex-direction: column !important;
+    align-items: stretch !important;
+  }
+
+  .header {
+    flex-direction: column !important;
+    align-items: flex-start !important;
+    gap: 12px !important;
+  }
+
+  .glass-panel {
+    padding: 18px 16px !important;
+  }
+}
+
+/* Wide screens: optional collapsed sidebar (full-width main + drawer) */
+@media (min-width: 901px) {
+  .sidebar-host--desktop-collapsed {
+    flex: 0 0 0 !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    align-self: stretch;
+  }
+
+  .sidebar-host--desktop-collapsed .sidebar-floating-toggle {
+    display: flex !important;
+  }
+
+  .sidebar-host--desktop-collapsed .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 2995;
+    width: 280px;
+    max-width: min(300px, 88vw);
+    transform: translateX(-105%);
+    transition: transform 0.25s ease;
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.35);
+    border-right: 1px solid var(--glass-border);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar-host--desktop-collapsed .sidebar.sidebar--open {
+    transform: translateX(0);
+  }
+
+  .layout:has(.sidebar-host--desktop-collapsed) .main-content {
+    padding-top: 56px !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .dropdown-menu {
+    right: 0 !important;
+    left: auto !important;
+    min-width: 200px !important;
+  }
 }

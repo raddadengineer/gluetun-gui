@@ -28,5 +28,9 @@ services:
     environment:
       # All GUI data files will live under /data
       - DATA_DIR=/data
+      # Optional: set a long random secret so existing JWTs invalidate after redeploy
+      # - JWT_SECRET=change-me-to-a-long-random-string
+      # Optional: JWT lifetime (e.g. 12h, 7d). Default 24h.
+      # - JWT_EXPIRES_IN=24h
     depends_on:
       - gluetun

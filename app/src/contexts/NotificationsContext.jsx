@@ -24,6 +24,12 @@ const DEFAULT_PREFS = {
     warning: false,
     info: false,
   },
+  /** Local browser time — suppress toast popups only (bell entries still apply). */
+  quietHours: {
+    enabled: false,
+    start: '22:00',
+    end: '07:00',
+  },
 };
 
 function safeParse(json) {
@@ -36,6 +42,27 @@ function safeParse(json) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parseHHMMToMinutes(s) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '').trim());
+  if (!m) return null;
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function isLocalBrowserQuietHours(qh) {
+  if (!qh?.enabled) return false;
+  const st = parseHHMMToMinutes(qh.start ?? '22:00');
+  const en = parseHHMMToMinutes(qh.end ?? '07:00');
+  if (st === null || en === null) return false;
+  const d = new Date();
+  const cur = d.getHours() * 60 + d.getMinutes();
+  if (st === en) return false;
+  if (st < en) return cur >= st && cur < en;
+  return cur >= st || cur < en;
 }
 
 const NotificationsContext = createContext(null);
@@ -60,6 +87,7 @@ export function NotificationsProvider({ children }) {
         sources: { ...prev.sources, ...(parsedPrefs.sources || {}) },
         levels: { ...prev.levels, ...(parsedPrefs.levels || {}) },
         toasts: { ...prev.toasts, ...(parsedPrefs.toasts || {}) },
+        quietHours: { ...prev.quietHours, ...(parsedPrefs.quietHours || {}) },
       }));
     }
   }, []);
@@ -102,8 +130,8 @@ export function NotificationsProvider({ children }) {
       return [...prev, item].slice(-200);
     });
 
-    // Optional toast for high-signal events
-    if (prefs.toasts?.[item.level]) {
+    // Optional toast for high-signal events (skipped during local quiet hours)
+    if (prefs.toasts?.[item.level] && !isLocalBrowserQuietHours(prefs.quietHours)) {
       addToast(item.title, item.level === 'success' ? 'success' : (item.level === 'error' ? 'error' : 'success'));
     }
   }, [addToast, prefs]);
@@ -133,7 +161,7 @@ export function NotificationsProvider({ children }) {
     setIsOpen,
     prefs,
     setPrefs,
-  }), [items, unreadCount, notify, markRead, markAllRead, clearAll, isOpen]);
+  }), [items, unreadCount, notify, markRead, markAllRead, clearAll, isOpen, setPrefs]);
 
   return (
     <NotificationsContext.Provider value={value}>

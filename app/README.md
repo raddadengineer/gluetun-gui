@@ -31,7 +31,7 @@ Commit or copy the generated **`server/public/`** tree as required by your deplo
 
 ## Stack (high level)
 
-- **React Router** — `/`, `/logs`, `/network`, `/settings`, `/login`
+- **React Router** — `/`, `/logs`, `/network`, `/settings`, `/about`, `/login`
 - **`ThemeContext`** — `data-theme` + `localStorage`
 - **`NotificationsContext`** — bell, list, toasts, prefs in `localStorage`
 - **Recharts** — Dashboard throughput

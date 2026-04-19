@@ -147,6 +147,48 @@ export default function Network() {
     fetchSessions();
   };
 
+  const exportSessionsCsv = () => {
+    const esc = (v) => {
+      const s = v == null ? '' : String(v);
+      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+      return s;
+    };
+    const rows = [
+      ['id', 'active', 'provider', 'vpnType', 'region', 'publicIp', 'location', 'serverIp', 'startedAt', 'endedAt', 'tun0_rx', 'tun0_tx', 'eth0_rx', 'eth0_tx'].join(','),
+    ];
+    sessions.forEach((sess) => {
+      const t0 = sess.interfaces?.tun0 || {};
+      const e0 = sess.interfaces?.eth0 || {};
+      rows.push(
+        [
+          sess.id,
+          sess.active,
+          sess.provider,
+          sess.vpnType,
+          sess.region,
+          sess.publicIp,
+          sess.location,
+          sess.serverIp,
+          sess.startedAt,
+          sess.endedAt,
+          t0.rx,
+          t0.tx,
+          e0.rx,
+          e0.tx,
+        ].map(esc).join(','),
+      );
+    });
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `gluetun-sessions-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   useEffect(() => {
     fetchMetrics();
     const iv = setInterval(fetchMetrics, 1500);
@@ -330,9 +372,12 @@ export default function Network() {
             <p style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
               {sessions.length} session{sessions.length !== 1 ? 's' : ''} recorded · sorted newest first
             </p>
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
               <button onClick={fetchSessions} className="btn" style={{ padding: '8px 14px', fontSize: '13px', background: 'var(--glass-bg)', border: '1px solid var(--glass-border)', color: 'var(--text-secondary)' }}>
                 <span className="material-icons-round" style={{ fontSize: '16px' }}>refresh</span> Refresh
+              </button>
+              <button type="button" onClick={exportSessionsCsv} disabled={sessions.length === 0} className="btn" style={{ padding: '8px 14px', fontSize: '13px', background: 'rgba(59,130,246,0.1)', color: 'var(--accent-primary)', border: '1px solid rgba(59,130,246,0.25)' }}>
+                <span className="material-icons-round" style={{ fontSize: '16px' }}>file_download</span> Export CSV
               </button>
               <button onClick={clearHistory} className="btn" style={{ padding: '8px 14px', fontSize: '13px', background: 'rgba(239,68,68,0.1)', color: 'var(--danger)', border: '1px solid rgba(239,68,68,0.2)' }}>
                 <span className="material-icons-round" style={{ fontSize: '16px' }}>delete_sweep</span> Clear History

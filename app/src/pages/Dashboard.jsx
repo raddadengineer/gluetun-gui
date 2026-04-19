@@ -423,8 +423,51 @@ export default function Dashboard() {
                   {status.containerName && (
                     <span style={{ fontSize: '10px', display: 'block', opacity: 0.85 }}>Container: {status.containerName}</span>
                   )}
+                  {status.imageUpdate?.updateAvailable && (
+                    <span style={{ fontSize: '11px', display: 'block', marginTop: '6px', color: 'var(--warning)', fontWeight: 600 }}>
+                      Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
+                    </span>
+                  )}
+                  {status.imageUpdate?.checkError && !status.imageUpdate?.updateAvailable && (
+                    <span style={{ fontSize: '10px', display: 'block', marginTop: '4px', opacity: 0.75 }}>
+                      Image update check: {status.imageUpdate.checkError}
+                    </span>
+                  )}
                 </span>
               </p>
+            )}
+
+            {status?.lastVpnConnectivityCheck?.at && (
+              <div style={{
+                marginTop: '10px',
+                padding: '10px 12px',
+                borderRadius: '8px',
+                border: `1px solid ${status.lastVpnConnectivityCheck.ok ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.35)'}`,
+                background: status.lastVpnConnectivityCheck.ok ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
+                fontSize: '12px',
+                lineHeight: 1.5,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: status.lastVpnConnectivityCheck.ok ? 'var(--success)' : 'var(--danger)', marginBottom: '4px' }}>
+                  <span className="material-icons-round" style={{ fontSize: '16px' }}>network_ping</span>
+                  Last VPN check ({formatDistanceToNow(new Date(status.lastVpnConnectivityCheck.at), { addSuffix: true })})
+                </div>
+                <div style={{ color: 'var(--text-secondary)' }}>
+                  {status.lastVpnConnectivityCheck.ok ? (
+                    <>
+                      OK — public IP {status.lastVpnConnectivityCheck.publicIp || '—'} via {status.lastVpnConnectivityCheck.method || 'probe'}
+                    </>
+                  ) : (
+                    <>
+                      Failed — {status.lastVpnConnectivityCheck.error || status.lastVpnConnectivityCheck.detail || 'Unknown'}
+                    </>
+                  )}
+                </div>
+                {status.lastVpnConnectivityCheck.ok === false && Date.now() - new Date(status.lastVpnConnectivityCheck.at).getTime() > 24 * 60 * 60 * 1000 && (
+                  <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--warning)' }}>
+                    Result is older than 24h — run <strong style={{ fontWeight: 600 }}>Test VPN connectivity</strong> again after changes.
+                  </div>
+                )}
+              </div>
             )}
 
             {piaMonitoring?.portForwarding && (

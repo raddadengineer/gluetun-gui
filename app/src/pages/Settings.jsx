@@ -2,6 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNotifications } from '../contexts/NotificationsContext';
 import { useTheme } from '../contexts/ThemeContext';
 
+function isGuiPiaProvider(v) {
+  return String(v || '').trim().toLowerCase() === 'private internet access';
+}
+
+function isGuiOpenVpnType(v) {
+  return String(v || '').trim().toLowerCase() === 'openvpn';
+}
+
+function isGuiWireGuardType(v) {
+  return String(v || 'wireguard').trim().toLowerCase() === 'wireguard';
+}
+
 export default function Settings() {
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
   const { theme, setTheme, themes } = useTheme();
@@ -9,11 +21,51 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [activeTab, setActiveTab] = useState('general');
+  const settingsFormRef = useRef(null);
+  const [settingsSearch, setSettingsSearch] = useState('');
+  const [saveDiffModal, setSaveDiffModal] = useState({
+    open: false,
+    changes: [],
+    pending: null,
+    /** After successful apply from the diff modal, run outbound VPN probe. */
+    runVpnProbeAfter: false,
+  });
 
   // GUI auth password change (never pre-filled)
   const [guiPasswordNew, setGuiPasswordNew] = useState('');
   const [guiPasswordConfirm, setGuiPasswordConfirm] = useState('');
   const importEnvRef = useRef(null);
+  const [homelabBackups, setHomelabBackups] = useState([]);
+  const [homelabBackupBusy, setHomelabBackupBusy] = useState(false);
+  const [diffHistoryOpen, setDiffHistoryOpen] = useState(false);
+  const [diffHistoryEntries, setDiffHistoryEntries] = useState([]);
+  const [diffHistoryLoading, setDiffHistoryLoading] = useState(false);
+
+  const refreshHomelabBackups = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const r = await fetch('/api/homelab/backups', { headers: { Authorization: `Bearer ${token}` } });
+      if (!r.ok) return;
+      const d = await r.json();
+      setHomelabBackups(Array.isArray(d.backups) ? d.backups : []);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshHomelabBackups();
+  }, [refreshHomelabBackups]);
+
+  useEffect(() => {
+    const root = settingsFormRef.current;
+    if (!root) return;
+    const q = settingsSearch.trim().toLowerCase();
+    root.querySelectorAll('.form-group').forEach((el) => {
+      const t = (el.textContent || '').toLowerCase();
+      el.style.display = !q || t.includes(q) ? '' : 'none';
+    });
+  }, [settingsSearch, activeTab]);
 
   // PIA WireGuard state
   const [piaUsername, setPiaUsername] = useState('');
@@ -26,6 +78,8 @@ export default function Settings() {
   const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [piaRegions, setPiaRegions] = useState([]);         // WireGuard regions (from PIA API)
   const [piaOpenVpnRegions, setPiaOpenVpnRegions] = useState([]); // PIA OpenVPN region labels for Gluetun SERVER_REGIONS
+  const [fetchingPiaWgRegions, setFetchingPiaWgRegions] = useState(false);
+  const [fetchingPiaOpenVpnList, setFetchingPiaOpenVpnList] = useState(false);
 
   // Dynamic server options state
   const [serverOptions, setServerOptions] = useState({ countries: [], regions: [], cities: [], hostnames: [], server_names: [] });
@@ -105,6 +159,7 @@ export default function Settings() {
   }, []);
 
   const fetchPiaRegions = async () => {
+    setFetchingPiaWgRegions(true);
     try {
       const res = await fetch('/api/pia/regions');
       if (!res.ok) {
@@ -116,11 +171,20 @@ export default function Settings() {
         throw new Error('Failed to fetch PIA regions: unexpected response');
       }
       setPiaRegions(regions);
+      notify({
+        level: 'success',
+        title: 'Regions updated',
+        message: `${regions.length} WireGuard region${regions.length === 1 ? '' : 's'} from PIA.`,
+        source: 'settings',
+        dedupeKey: 'pia_wg_regions_ok',
+      });
     } catch (e) {
       console.error(e);
       setMessage({ type: 'error', text: e.message || 'Failed to fetch PIA regions.' });
       notify({ level: 'error', title: 'PIA regions fetch failed', message: e.message, source: 'settings', dedupeKey: 'pia_regions_fetch' });
       setTimeout(() => setMessage(null), 4000);
+    } finally {
+      setFetchingPiaWgRegions(false);
     }
   };
 
@@ -150,7 +214,9 @@ export default function Settings() {
     return piaWgRegionsList.map(id => piaRegionNameById.get(id) || id).join(' ➜ ');
   }, [piaRegionNameById, piaWgRegionsList]);
 
-  const fetchPiaOpenVpnRegions = useCallback(async () => {
+  const fetchPiaOpenVpnRegions = useCallback(async (opts) => {
+    const userClick = opts?.userInitiated === true;
+    setFetchingPiaOpenVpnList(true);
     try {
       const token = localStorage.getItem('token');
       const portForwardGui =
@@ -165,23 +231,42 @@ export default function Settings() {
         throw new Error(`Failed to fetch PIA OpenVPN servers (${res.status})${text ? `: ${text}` : ''}`);
       }
       const data = await res.json();
+      if (data.unknownProvider) {
+        throw new Error('Provider not found in Gluetun server list (servers.json).');
+      }
       // Gluetun validates PIA OpenVPN SERVER_REGIONS against region labels (e.g. "DE Berlin"); legacy server_name codes are mapped on save.
       const names = [...(data.server_names || [])].filter(Boolean);
       const combined = names.length
         ? Array.from(new Set(names)).sort((a, b) => a.localeCompare(b))
         : Array.from(new Set([...(data.regions || []), ...(data.countries || [])])).sort((a, b) => a.localeCompare(b));
+      if (combined.length === 0) {
+        throw new Error(
+          'No regions returned (empty list). If VPN port forwarding is on, try disabling it to load all OpenVPN regions, or check the server can reach GitHub (servers.json).',
+        );
+      }
       setPiaOpenVpnRegions(combined);
+      if (userClick) {
+        notify({
+          level: 'success',
+          title: 'OpenVPN server list updated',
+          message: `${combined.length} region${combined.length === 1 ? '' : 's'} loaded.`,
+          source: 'settings',
+          dedupeKey: 'pia_ov_fetch_ok',
+        });
+      }
     } catch (e) {
       console.error(e);
       setMessage({ type: 'error', text: e.message || 'Failed to fetch PIA OpenVPN servers.' });
       notify({ level: 'error', title: 'PIA OpenVPN list failed', message: e.message, source: 'settings', dedupeKey: 'pia_ov_fetch' });
       setTimeout(() => setMessage(null), 5000);
+    } finally {
+      setFetchingPiaOpenVpnList(false);
     }
   }, [notify, piaPortForwarding, config.VPN_PORT_FORWARDING]);
 
   useEffect(() => {
-    if (config.VPN_SERVICE_PROVIDER !== 'private internet access') return;
-    if ((config.VPN_TYPE || '') !== 'openvpn') return;
+    if (!isGuiPiaProvider(config.VPN_SERVICE_PROVIDER)) return;
+    if (!isGuiOpenVpnType(config.VPN_TYPE)) return;
     fetchPiaOpenVpnRegions();
   }, [config.VPN_SERVICE_PROVIDER, config.VPN_TYPE, piaPortForwarding, config.VPN_PORT_FORWARDING, fetchPiaOpenVpnRegions]);
 
@@ -202,13 +287,29 @@ export default function Settings() {
         `/api/helpers/servers?provider=${encodeURIComponent(config.VPN_SERVICE_PROVIDER || '')}&vpnType=${config.VPN_TYPE || 'wireguard'}`,
         { headers: { 'Authorization': `Bearer ${token}` } }
       );
-      if (res.ok) {
-        const data = await res.json();
-        // Base fetch: all countries always come back unfiltered from backend
-        setServerOptions(data);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = data?.error || `Failed to fetch servers (${res.status})`;
+        throw new Error(typeof msg === 'string' ? msg : `Failed to fetch servers (${res.status})`);
       }
+      if (data.unknownProvider) {
+        throw new Error(
+          `Unknown provider "${config.VPN_SERVICE_PROVIDER || ''}" for Gluetun. Use the exact name from Gluetun (e.g. mullvad, nordvpn, private internet access).`,
+        );
+      }
+      // Base fetch: all countries always come back unfiltered from backend
+      setServerOptions({
+        countries: data.countries || [],
+        regions: data.regions || [],
+        cities: data.cities || [],
+        hostnames: data.hostnames || [],
+        server_names: data.server_names || [],
+      });
     } catch (e) {
       console.error('Failed to fetch servers:', e);
+      setMessage({ type: 'error', text: e.message || 'Failed to fetch servers.' });
+      notify({ level: 'error', title: 'Server list failed', message: e.message, source: 'settings', dedupeKey: 'generic_servers_fetch' });
+      setTimeout(() => setMessage(null), 5000);
     }
     setFetchingServers(false);
   };
@@ -230,13 +331,14 @@ export default function Settings() {
       });
       if (res.ok) {
         const data = await res.json();
+        if (data.unknownProvider) return;
         // Merge: always keep full country list from original fetch, update the rest
         setServerOptions(prev => ({
           countries: prev.countries,
-          regions: data.regions,
-          cities: data.cities,
-          hostnames: data.hostnames,
-          server_names: data.server_names,
+          regions: data.regions || [],
+          cities: data.cities || [],
+          hostnames: data.hostnames || [],
+          server_names: data.server_names || [],
         }));
       }
     } catch (e) {
@@ -314,7 +416,7 @@ export default function Settings() {
   };
 
   const buildSaveData = (baseConfig) => {
-    const activePiaRegions = ((baseConfig?.VPN_TYPE || config.VPN_TYPE) === 'openvpn')
+    const activePiaRegions = isGuiOpenVpnType(baseConfig?.VPN_TYPE || config.VPN_TYPE)
       ? piaOpenVpnRegionsList.join(',')
       : piaWgRegionsList.join(',');
     const saveData = {
@@ -328,10 +430,7 @@ export default function Settings() {
       PIA_PASSWORD: piaPassword,
     };
     // Gluetun OpenVPN auth uses OPENVPN_* only; copy from PIA_* when OpenVPN fields are empty (same PIA login).
-    if (
-      saveData.VPN_SERVICE_PROVIDER === 'private internet access' &&
-      String(saveData.VPN_TYPE || '').toLowerCase() === 'openvpn'
-    ) {
+    if (isGuiPiaProvider(saveData.VPN_SERVICE_PROVIDER) && isGuiOpenVpnType(saveData.VPN_TYPE)) {
       if (!String(saveData.OPENVPN_USER || '').trim() && piaUsername) saveData.OPENVPN_USER = piaUsername;
       if (!String(saveData.OPENVPN_PASSWORD || '').trim() && piaPassword) saveData.OPENVPN_PASSWORD = piaPassword;
     }
@@ -457,13 +556,87 @@ export default function Settings() {
     handleServerFieldChange(fieldName, newValue, newConfig);
   };
 
-  const handleSave = async (e) => {
-    e.preventDefault();
+  const runConfigPost = async (saveData) => {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(saveData)
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const extra =
+        Array.isArray(data.containerDiff) && data.containerDiff.length
+          ? ` Gluetun env delta: ${data.containerDiff.length} key(s).`
+          : '';
+      setMessage({ type: 'success', text: (data.message || 'All settings securely saved to .env file!') + extra });
+      notify({
+        level: 'success',
+        title: 'Settings saved',
+        message: `${(data.message || 'Configuration written and Gluetun updated.').slice(0, 200)}${extra}`.slice(0, 280),
+        source: 'settings',
+        dedupeKey: 'settings_save_ok',
+      });
+      if (guiPasswordNew) {
+        setGuiPasswordNew('');
+        setGuiPasswordConfirm('');
+        notify({
+          level: 'success',
+          title: 'GUI password updated',
+          message: 'Use the new password next time you sign in.',
+          source: 'settings',
+          dedupeKey: 'gui_password_changed',
+        });
+      }
+      return true;
+    }
+    const errData = await res.json().catch(() => ({}));
+    setMessage({ type: 'error', text: errData.error || `Server returned ${res.status}: ${res.statusText}` });
+    notify({
+      level: 'error',
+      title: 'Save failed',
+      message: errData.error || `Server returned ${res.status}`,
+      source: 'settings',
+      dedupeKey: 'settings_save_err',
+    });
+    return false;
+  };
+
+  const runConnectivityProbeAfterSave = async () => {
+    const token = localStorage.getItem('token');
+    const res = await fetch('/api/vpn/connectivity-test', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (data.ok) {
+      notify({
+        level: 'success',
+        title: 'VPN connectivity OK',
+        message: `Public IP: ${data.publicIp || '—'} (${data.method || 'probe'})`,
+        source: 'settings',
+        dedupeKey: 'settings_vpn_probe_ok',
+      });
+    } else {
+      notify({
+        level: 'warning',
+        title: 'VPN check after save',
+        message: (data.detail || data.error || 'Probe did not confirm outbound traffic').slice(0, 240),
+        source: 'settings',
+        dedupeKey: 'settings_vpn_probe_fail',
+      });
+    }
+  };
+
+  const openSavePreview = async (alsoRunVpnProbe) => {
     setSaving(true);
     try {
       const token = localStorage.getItem('token');
       const saveData = buildSaveData();
-      const res = await fetch('/api/config', {
+      const previewRes = await fetch('/api/config/preview-diff', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -471,37 +644,61 @@ export default function Settings() {
         },
         body: JSON.stringify(saveData)
       });
-      if (res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setMessage({ type: 'success', text: data.message || 'All settings securely saved to .env file!' });
-        notify({
-          level: 'success',
-          title: 'Settings saved',
-          message: (data.message || 'Configuration written and Gluetun updated.').slice(0, 200),
-          source: 'settings',
-          dedupeKey: 'settings_save_ok',
-        });
-        if (guiPasswordNew) {
-          setGuiPasswordNew('');
-          setGuiPasswordConfirm('');
+      const preview = await previewRes.json().catch(() => ({}));
+      if (!previewRes.ok) {
+        throw new Error(preview.error || `Could not compare configuration (${previewRes.status})`);
+      }
+      const changes = preview.changes || [];
+      if (changes.length === 0) {
+        if (alsoRunVpnProbe) {
+          setMessage({ type: 'success', text: 'No configuration changes. Running connectivity check…' });
+          await runConnectivityProbeAfterSave();
+        } else {
+          setMessage({ type: 'success', text: 'No changes to save.' });
+        }
+        setSaving(false);
+        setTimeout(() => setMessage(null), 3000);
+        return;
+      }
+      setSaveDiffModal({ open: true, changes, pending: saveData, runVpnProbeAfter: !!alsoRunVpnProbe });
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message });
+      notify({ level: 'error', title: 'Save failed', message: err.message, source: 'settings', dedupeKey: 'settings_save_exc' });
+    }
+    setSaving(false);
+    setTimeout(() => setMessage(null), 5000);
+  };
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    await openSavePreview(false);
+  };
+
+  const handleSaveAndConnect = async (e) => {
+    e?.preventDefault();
+    await openSavePreview(true);
+  };
+
+  const confirmSaveAfterDiff = async () => {
+    const pending = saveDiffModal.pending;
+    const runProbeAfter = !!saveDiffModal.runVpnProbeAfter;
+    if (!pending) return;
+    setSaveDiffModal({ open: false, changes: [], pending: null, runVpnProbeAfter: false });
+    setSaving(true);
+    try {
+      const ok = await runConfigPost(pending);
+      if (ok && runProbeAfter) {
+        try {
+          await runConnectivityProbeAfterSave();
+        } catch (probeErr) {
           notify({
-            level: 'success',
-            title: 'GUI password updated',
-            message: 'Use the new password next time you sign in.',
+            level: 'error',
+            title: 'Connectivity check failed',
+            message: probeErr.message,
             source: 'settings',
-            dedupeKey: 'gui_password_changed',
+            dedupeKey: 'settings_vpn_probe_exc',
           });
         }
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        setMessage({ type: 'error', text: errData.error || `Server returned ${res.status}: ${res.statusText}` });
-        notify({
-          level: 'error',
-          title: 'Save failed',
-          message: errData.error || `Server returned ${res.status}`,
-          source: 'settings',
-          dedupeKey: 'settings_save_err',
-        });
       }
     } catch (err) {
       setMessage({ type: 'error', text: err.message });
@@ -619,6 +816,24 @@ export default function Settings() {
         </div>
       )}
 
+      <div className="settings-search-bar glass-panel" style={{ padding: '12px 16px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+        <span className="material-icons-round" style={{ color: 'var(--text-secondary)' }}>search</span>
+        <input
+          type="search"
+          className="text-input"
+          placeholder="Filter fields on this tab (labels & values)…"
+          value={settingsSearch}
+          onChange={(e) => setSettingsSearch(e.target.value)}
+          style={{ flex: 1, minWidth: '200px', margin: 0 }}
+          aria-label="Filter settings"
+        />
+        {settingsSearch.trim() && (
+          <button type="button" className="btn" onClick={() => setSettingsSearch('')} style={{ padding: '6px 12px', fontSize: '13px' }}>
+            Clear
+          </button>
+        )}
+      </div>
+
       <div className="tabs-container">
         <button className={`tab-btn ${activeTab === 'general' ? 'active' : ''}`} onClick={() => setActiveTab('general')}>
           <span className="material-icons-round">vpn_key</span> VPN &amp; tunnel
@@ -632,16 +847,16 @@ export default function Settings() {
         <button className={`tab-btn ${activeTab === 'proxies' ? 'active' : ''}`} onClick={() => setActiveTab('proxies')}>
           <span className="material-icons-round">cell_wifi</span> Local proxies
         </button>
-        <button className={`tab-btn ${activeTab === 'application' ? 'active' : ''}`} onClick={() => setActiveTab('application')}>
-          <span className="material-icons-round">widgets</span> This app
-        </button>
         <button className={`tab-btn ${activeTab === 'advanced' ? 'active' : ''}`} onClick={() => setActiveTab('advanced')}>
           <span className="material-icons-round">settings_applications</span> Gluetun advanced
+        </button>
+        <button className={`tab-btn ${activeTab === 'application' ? 'active' : ''}`} onClick={() => setActiveTab('application')}>
+          <span className="material-icons-round">widgets</span> This app
         </button>
       </div>
 
       <div className="glass-panel" style={{ padding: '32px' }}>
-        <form onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        <form ref={settingsFormRef} onSubmit={handleSave} style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
           {activeTab === 'general' && (
             <>
@@ -694,10 +909,10 @@ export default function Settings() {
               </div>
 
               {/* ── PIA Provider: Either/Or WireGuard or OpenVPN panels, no generic blocks ── */}
-              {config.VPN_SERVICE_PROVIDER === 'private internet access' ? (
+              {isGuiPiaProvider(config.VPN_SERVICE_PROVIDER) ? (
                 <>
                   {/* PIA WireGuard Panel */}
-                  {(config.VPN_TYPE || 'wireguard') === 'wireguard' && (
+                  {isGuiWireGuardType(config.VPN_TYPE) && (
                     <>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '4px 0' }} />
                       <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid var(--glass-highlight)' }}>
@@ -767,15 +982,29 @@ export default function Settings() {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                           <label style={{ marginBottom: 0 }}>Regions — Auto-Failover Sequence
                             <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>{piaWgRegionsList.length} selected</span>
+                            {fetchingPiaWgRegions && (
+                              <span style={{ marginLeft: '10px', fontSize: '12px', color: 'var(--accent-primary)', display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 500 }}>
+                                <span className="material-icons-round" style={{ fontSize: '14px', animation: 'spin 1s linear infinite' }}>refresh</span>
+                                Loading from PIA…
+                              </span>
+                            )}
                           </label>
                           <div style={{ display: 'flex', gap: '8px' }}>
                             {piaWgRegionsList.length > 0 && (
-                              <button type="button" onClick={() => setPiaWgRegionsList([])} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                              <button type="button" onClick={() => setPiaWgRegionsList([])} disabled={fetchingPiaWgRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
                                 <span className="material-icons-round" style={{ fontSize: '13px' }}>clear_all</span> Clear
                               </button>
                             )}
-                            <button type="button" onClick={fetchPiaRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(59,130,246,0.1)' }}>
-                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Refresh
+                            <button
+                              type="button"
+                              onClick={fetchPiaRegions}
+                              disabled={fetchingPiaWgRegions}
+                              aria-busy={fetchingPiaWgRegions}
+                              className="btn"
+                              style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(59,130,246,0.1)', opacity: fetchingPiaWgRegions ? 0.85 : 1 }}
+                            >
+                              <span className="material-icons-round" style={{ fontSize: '13px', animation: fetchingPiaWgRegions ? 'spin 1s linear infinite' : undefined }}>refresh</span>
+                              {fetchingPiaWgRegions ? 'Refreshing…' : 'Refresh'}
                             </button>
                           </div>
                         </div>
@@ -803,7 +1032,11 @@ export default function Settings() {
                               );
                             }) : (
                               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
-                                {piaPortForwarding ? 'No port-forwarding regions available yet. Click \"Refresh\".' : 'Click \"Refresh\" to load regions from PIA...'}
+                                {fetchingPiaWgRegions
+                                  ? 'Loading regions from PIA…'
+                                  : piaPortForwarding
+                                    ? 'No port-forwarding regions available yet. Click \"Refresh\".'
+                                    : 'Click \"Refresh\" to load regions from PIA...'}
                               </div>
                             )}
                           </div>
@@ -859,7 +1092,7 @@ export default function Settings() {
                   )}
 
                   {/* PIA OpenVPN Panel */}
-                  {config.VPN_TYPE === 'openvpn' && (
+                  {isGuiOpenVpnType(config.VPN_TYPE) && (
                     <>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '4px 0' }} />
                       <div style={{
@@ -987,15 +1220,29 @@ export default function Settings() {
                             <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-secondary)', fontWeight: 400 }}>
                               {piaOpenVpnRegionsList.length} selected
                             </span>
+                            {fetchingPiaOpenVpnList && (
+                              <span style={{ marginLeft: '10px', fontSize: '12px', color: 'var(--success)', display: 'inline-flex', alignItems: 'center', gap: '5px', fontWeight: 500 }}>
+                                <span className="material-icons-round" style={{ fontSize: '14px', animation: 'spin 1s linear infinite' }}>refresh</span>
+                                Loading from Gluetun…
+                              </span>
+                            )}
                           </label>
                           <div style={{ display: 'flex', gap: '8px' }}>
                             {piaOpenVpnRegionsList.length > 0 && (
-                              <button type="button" onClick={() => setPiaOpenVpnRegionsList([])} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                              <button type="button" onClick={() => setPiaOpenVpnRegionsList([])} disabled={fetchingPiaOpenVpnList} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
                                 <span className="material-icons-round" style={{ fontSize: '13px' }}>clear_all</span> Clear
                               </button>
                             )}
-                            <button type="button" onClick={fetchPiaOpenVpnRegions} className="btn" style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)' }}>
-                              <span className="material-icons-round" style={{ fontSize: '13px' }}>refresh</span> Fetch server list
+                            <button
+                              type="button"
+                              onClick={() => fetchPiaOpenVpnRegions({ userInitiated: true })}
+                              disabled={fetchingPiaOpenVpnList}
+                              aria-busy={fetchingPiaOpenVpnList}
+                              className="btn"
+                              style={{ padding: '4px 10px', fontSize: '12px', background: 'rgba(16,185,129,0.1)', color: 'var(--success)', border: '1px solid rgba(16,185,129,0.3)', opacity: fetchingPiaOpenVpnList ? 0.85 : 1 }}
+                            >
+                              <span className="material-icons-round" style={{ fontSize: '13px', animation: fetchingPiaOpenVpnList ? 'spin 1s linear infinite' : undefined }}>refresh</span>
+                              {fetchingPiaOpenVpnList ? 'Fetching…' : 'Fetch server list'}
                             </button>
                           </div>
                         </div>
@@ -1020,7 +1267,9 @@ export default function Settings() {
                               );
                             }) : (
                               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
-                                Loading server list… use &quot;Fetch server list&quot; if nothing appears.
+                                {fetchingPiaOpenVpnList
+                                  ? 'Fetching server list from Gluetun (servers.json)…'
+                                  : 'No regions loaded yet. Click \"Fetch server list\" to load labels from Gluetun.'}
                               </div>
                             )}
                           </div>
@@ -1163,12 +1412,16 @@ export default function Settings() {
                     </div>
                   </div>
 
-                  {/* Non-PIA: Generic WireGuard + OpenVPN config */}
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '4px 0 0 0', lineHeight: 1.45 }}>
+                    Protocol-specific fields below follow <strong style={{ fontWeight: 600 }}>VPN Type</strong> (same idea as PIA): choose WireGuard or OpenVPN above to show only the matching section.
+                  </p>
+
+                  {isGuiWireGuardType(config.VPN_TYPE) && (
                   <>
                   <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
                   <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
-                    WireGuard Configuration
+                    WireGuard configuration
                   </h3>
 
                   <div className="form-group">
@@ -1227,11 +1480,15 @@ export default function Settings() {
                       <input type="text" name="WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL" value={config.WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL || ''} onChange={handleChange} className="text-input" placeholder="e.g. 25s" />
                     </div>
                   </div>
+                  </>
+                  )}
 
+                  {isGuiOpenVpnType(config.VPN_TYPE) && (
+                  <>
                   <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
                   <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>lock</span>
-                    OpenVPN Configuration
+                    OpenVPN configuration
                   </h3>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
@@ -1342,8 +1599,9 @@ export default function Settings() {
                       <input type="password" name="OPENVPN_KEY_PASSPHRASE" value={config.OPENVPN_KEY_PASSPHRASE || ''} onChange={handleChange} className="text-input" placeholder="Decrypt encrypted key" />
                     </div>
                   </div>
+                  </>
+                  )}
                 </>
-                </> // end non-PIA else branch
               )} {/* end PIA ternary */}
 
             </>
@@ -1778,6 +2036,53 @@ export default function Settings() {
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>webhook</span>
+                Outbound webhooks
+              </h3>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
+                Optional HTTP POST for automation when the monitor detects loss of connectivity, port forwarding failures, or a missing Gluetun container. JSON body includes <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>event</code>, <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>timestamp</code>, and details. Not passed to Gluetun.
+              </p>
+              <div className="form-group">
+                <label>Webhook URL</label>
+                <input type="url" name="GUI_NOTIFY_WEBHOOK_URL" value={config.GUI_NOTIFY_WEBHOOK_URL || ''} onChange={handleChange} className="text-input" placeholder="https://example.com/hooks/gluetun" />
+              </div>
+              <div className="form-group">
+                <label>Webhook bearer secret (optional)</label>
+                <input type="password" name="GUI_NOTIFY_WEBHOOK_SECRET" value={config.GUI_NOTIFY_WEBHOOK_SECRET || ''} onChange={handleChange} className="text-input" placeholder="Sent as Authorization: Bearer …" autoComplete="off" />
+              </div>
+
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                Quiet hours use the <strong style={{ fontWeight: 600 }}>server clock</strong> (usually UTC in Docker). No outbound webhook POSTs are sent during this window.
+              </p>
+              <div className="toggle-switch-container" style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '12px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '15px' }}>Webhook quiet hours</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Suppress monitor webhooks (GUI .env)</span>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    name="GUI_NOTIFY_QUIET_ENABLED"
+                    checked={config.GUI_NOTIFY_QUIET_ENABLED === 'on' || config.GUI_NOTIFY_QUIET_ENABLED === 'true'}
+                    onChange={(e) => setConfig((c) => ({ ...c, GUI_NOTIFY_QUIET_ENABLED: e.target.checked ? 'on' : 'off' }))}
+                  />
+                  <span className="slider"></span>
+                </label>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <div className="form-group">
+                  <label>Quiet start (HH:MM)</label>
+                  <input type="text" name="GUI_NOTIFY_QUIET_START" value={config.GUI_NOTIFY_QUIET_START || '22:00'} onChange={handleChange} className="text-input" placeholder="22:00" />
+                </div>
+                <div className="form-group">
+                  <label>Quiet end (HH:MM)</label>
+                  <input type="text" name="GUI_NOTIFY_QUIET_END" value={config.GUI_NOTIFY_QUIET_END || '07:00'} onChange={handleChange} className="text-input" placeholder="07:00" />
+                </div>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>notifications</span>
                 Notifications
               </h3>
@@ -1842,6 +2147,49 @@ export default function Settings() {
                 </div>
               </div>
 
+              <div className="glass-panel" style={{ padding: '16px', marginTop: '12px', borderRadius: '12px', border: '1px solid var(--glass-border)' }}>
+                <strong style={{ display: 'block', marginBottom: '8px' }}>Local quiet hours (this browser)</strong>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0' }}>
+                  Suppresses <strong style={{ fontWeight: 600 }}>toast popups</strong> only during the window; the notification bell still receives items.
+                </p>
+                <div className="toggle-switch-container" style={{ padding: '10px 0', borderBottom: '1px solid var(--glass-border)' }}>
+                  <div className="toggle-info">
+                    <strong style={{ fontSize: '14px' }}>Enable</strong>
+                    <span>Uses your computer local time</span>
+                  </div>
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={!!notifyPrefs?.quietHours?.enabled}
+                      onChange={(e) => setNotifyPrefs((p) => ({ ...p, quietHours: { ...(p.quietHours || {}), enabled: e.target.checked } }))}
+                    />
+                    <span className="slider"></span>
+                  </label>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '12px' }}>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Start</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      value={notifyPrefs?.quietHours?.start || '22:00'}
+                      onChange={(e) => setNotifyPrefs((p) => ({ ...p, quietHours: { ...(p.quietHours || {}), start: e.target.value } }))}
+                      placeholder="22:00"
+                    />
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>End</label>
+                    <input
+                      type="text"
+                      className="text-input"
+                      value={notifyPrefs?.quietHours?.end || '07:00'}
+                      onChange={(e) => setNotifyPrefs((p) => ({ ...p, quietHours: { ...(p.quietHours || {}), end: e.target.value } }))}
+                      placeholder="07:00"
+                    />
+                  </div>
+                </div>
+              </div>
+
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -1872,6 +2220,155 @@ export default function Settings() {
                 <span className="material-icons-round" style={{ fontSize: '18px' }}>upload_file</span>
                 Import from file…
               </button>
+
+              <h4 style={{ fontSize: '15px', fontWeight: 600, margin: '20px 0 10px 0' }}>Scheduled data backup</h4>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0' }}>
+                Writes <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>.tar.gz</code> under <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>DATA_DIR/backups/</code> (gui-config, sessions, VPN probe state, gluetun.env, wireguard/). Requires <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>DATA_DIR</code> on the server.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginBottom: '12px' }}>
+                <div className="form-group">
+                  <label>Interval (hours, 0 = off)</label>
+                  <input type="number" min="0" step="1" name="GUI_BACKUP_INTERVAL_HOURS" value={config.GUI_BACKUP_INTERVAL_HOURS ?? ''} onChange={handleChange} className="text-input" placeholder="0" />
+                </div>
+                <div className="form-group">
+                  <label>Retention (archives to keep)</label>
+                  <input type="number" min="1" max="500" name="GUI_BACKUP_RETENTION" value={config.GUI_BACKUP_RETENTION ?? '10'} onChange={handleChange} className="text-input" />
+                </div>
+              </div>
+              <div className="form-group">
+                <label>Diff history max entries</label>
+                <input type="number" min="5" max="200" name="GUI_DIFF_HISTORY_MAX" value={config.GUI_DIFF_HISTORY_MAX ?? '30'} onChange={handleChange} className="text-input" />
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>After each successful save, redacted GUI env diffs are appended on the server.</p>
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '12px' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={homelabBackupBusy}
+                  onClick={async () => {
+                    setHomelabBackupBusy(true);
+                    try {
+                      const token = localStorage.getItem('token');
+                      const r = await fetch('/api/homelab/backup-run', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+                      const d = await r.json().catch(() => ({}));
+                      if (!r.ok) throw new Error(d.error || `Backup failed (${r.status})`);
+                      notify({ level: 'success', title: 'Backup created', message: d.filename || 'Archive written', source: 'settings', dedupeKey: 'homelab_backup_ok' });
+                      refreshHomelabBackups();
+                    } catch (e) {
+                      notify({ level: 'error', title: 'Backup failed', message: e.message, source: 'settings', dedupeKey: 'homelab_backup_err' });
+                    } finally {
+                      setHomelabBackupBusy(false);
+                    }
+                  }}
+                >
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>archive</span>
+                  {homelabBackupBusy ? 'Running…' : 'Run backup now'}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    try {
+                      const token = localStorage.getItem('token');
+                      const r = await fetch('/api/compose-snippet', { headers: { Authorization: `Bearer ${token}` } });
+                      const text = await r.text();
+                      if (!r.ok) {
+                        let err = text;
+                        try {
+                          const j = JSON.parse(text);
+                          err = j.error || err;
+                        } catch { /* use text */ }
+                        throw new Error(err || `HTTP ${r.status}`);
+                      }
+                      await navigator.clipboard.writeText(text);
+                      notify({ level: 'success', title: 'Compose snippet copied', message: 'Paste into a client stack YAML.', source: 'settings', dedupeKey: 'compose_snippet_copy' });
+                    } catch (e) {
+                      notify({ level: 'error', title: 'Copy failed', message: e.message, source: 'settings', dedupeKey: 'compose_snippet_err' });
+                    }
+                  }}
+                >
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>content_copy</span>
+                  Copy compose client snippet
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={async () => {
+                    setDiffHistoryLoading(true);
+                    setDiffHistoryOpen(true);
+                    try {
+                      const token = localStorage.getItem('token');
+                      const r = await fetch('/api/config/diff-history', { headers: { Authorization: `Bearer ${token}` } });
+                      const d = await r.json();
+                      setDiffHistoryEntries(Array.isArray(d.entries) ? d.entries : []);
+                    } catch {
+                      setDiffHistoryEntries([]);
+                    } finally {
+                      setDiffHistoryLoading(false);
+                    }
+                  }}
+                >
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>history</span>
+                  View config diff history
+                </button>
+              </div>
+              {homelabBackups.length > 0 && (
+                <div style={{ fontSize: '12px', color: 'var(--text-secondary)', maxHeight: '140px', overflow: 'auto', border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '8px' }}>
+                  <strong style={{ color: 'var(--text-primary)' }}>Recent archives</strong>
+                  <ul style={{ margin: '8px 0 0 16px', padding: 0 }}>
+                    {homelabBackups.slice(0, 12).map((b) => (
+                      <li key={b.name} style={{ marginBottom: '4px' }}>
+                        {b.name} — {(b.size / 1024).toFixed(1)} KiB — {b.mtime}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {diffHistoryOpen && (
+                <div
+                  role="presentation"
+                  onClick={() => setDiffHistoryOpen(false)}
+                  style={{
+                  position: 'fixed',
+                  inset: 0,
+                  background: 'rgba(0,0,0,0.45)',
+                  zIndex: 1000,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  padding: '16px',
+                }}
+                >
+                  <div
+                    role="dialog"
+                    className="glass-panel"
+                    onClick={(e) => e.stopPropagation()}
+                    style={{ maxWidth: '720px', width: '100%', maxHeight: '80vh', overflow: 'auto', padding: '20px' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                      <h3 style={{ margin: 0, fontSize: '18px' }}>Config diff history</h3>
+                      <button type="button" className="btn" onClick={() => setDiffHistoryOpen(false)}>Close</button>
+                    </div>
+                    {diffHistoryLoading ? (
+                      <p style={{ color: 'var(--text-secondary)' }}>Loading…</p>
+                    ) : diffHistoryEntries.length === 0 ? (
+                      <p style={{ color: 'var(--text-secondary)' }}>No entries yet. Save settings after upgrading to populate.</p>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                        {[...diffHistoryEntries].reverse().map((entry, idx) => (
+                          <div key={`${entry.at}-${idx}`} style={{ border: '1px solid var(--glass-border)', borderRadius: '8px', padding: '10px', fontSize: '12px' }}>
+                            <div style={{ fontWeight: 600, marginBottom: '6px' }}>{entry.at} — {entry.changeCount} change(s)</div>
+                            <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '11px', maxHeight: '200px', overflow: 'auto' }}>
+                              {JSON.stringify(entry.changes, null, 2)}
+                            </pre>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </>
           )}
 
@@ -1942,7 +2439,10 @@ export default function Settings() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
                 <div className="form-group">
                   <label>Updater Period</label>
-                  <input type="text" name="UPDATER_PERIOD" value={config.UPDATER_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="24h (0 to disable)" />
+                  <input type="text" name="UPDATER_PERIOD" value={config.UPDATER_PERIOD || ''} onChange={handleChange} className="text-input" placeholder="e.g. 24h, 30m (0 = off)" />
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '6px 0 0 0', lineHeight: 1.45 }}>
+                    Gluetun requires a <strong style={{ fontWeight: 600 }}>unit</strong> (h, m, s). A plain number like <code style={{ fontSize: '10px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>12</code> is invalid; use <code style={{ fontSize: '10px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>12h</code>. Saving from this GUI turns bare numbers into hours automatically.
+                  </p>
                 </div>
                 <div className="form-group">
                   <label>Updater Min Ratio</label>
@@ -2038,11 +2538,46 @@ export default function Settings() {
                 VPN Lifecycle Hooks
               </h3>
 
-              <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
-                <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
-                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
-                  Shell commands executed when VPN connects/disconnects. Use <code style={{ background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>{'{{VPN_INTERFACE}}'}</code> as a template variable.
-                </p>
+              <div style={{
+                padding: '14px 16px',
+                borderRadius: '10px',
+                background: 'rgba(59, 130, 246, 0.08)',
+                border: '1px solid rgba(59, 130, 246, 0.22)',
+                marginBottom: '12px',
+              }}>
+                <div style={{ display: 'flex', gap: '14px', alignItems: 'flex-start' }}>
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)', fontSize: '24px', flexShrink: 0, lineHeight: 1 }}>info</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: '14px', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.01em', marginBottom: '6px' }}>
+                      Shell hooks
+                    </div>
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.55 }}>
+                      Gluetun runs <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>VPN_UP_COMMAND</code> when the tunnel is up and <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>VPN_DOWN_COMMAND</code> when it goes down.
+                    </p>
+                    <ul style={{
+                      margin: 0,
+                      paddingLeft: '1.1rem',
+                      fontSize: '12px',
+                      color: 'var(--text-secondary)',
+                      lineHeight: 1.55,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                    }}>
+                      <li>
+                        <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Placeholder</span>{' '}
+                        <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>{'{{VPN_INTERFACE}}'}</code>
+                        {' '}is replaced with the tunnel device name (same idea as <strong style={{ fontWeight: 600 }}>VPN interface name</strong> above, e.g.{' '}
+                        <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>tun0</code>
+                        ).
+                      </li>
+                      <li>
+                        <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>Multiple steps</span>{' '}
+                        use one shell line per field, or wrap in <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', whiteSpace: 'nowrap' }}>/bin/sh -c &apos;…&apos;</code>.
+                      </li>
+                    </ul>
+                  </div>
+                </div>
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
@@ -2059,8 +2594,102 @@ export default function Settings() {
             </>
           )}
 
+          <div
+            style={{
+              marginTop: '8px',
+              paddingTop: '24px',
+              borderTop: '1px solid var(--glass-border)',
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '12px',
+              justifyContent: 'flex-end',
+              alignItems: 'center',
+            }}
+          >
+            <p style={{ flex: '1 1 220px', margin: 0, fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              Applies all tabs, then recreates Gluetun. <strong style={{ fontWeight: 600 }}>Save &amp; connect</strong> runs an outbound VPN check after a successful save (same as Dashboard → Test VPN connectivity).
+            </p>
+            <button type="button" className="btn" disabled={saving} onClick={(e) => handleSave(e)}>
+              <span className="material-icons-round">save</span>
+              {saving ? 'Saving…' : 'Save all changes'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={saving}
+              onClick={(e) => handleSaveAndConnect(e)}
+              style={{ background: 'var(--success)', boxShadow: '0 4px 14px rgba(16,185,129,0.25)' }}
+            >
+              <span className="material-icons-round">{saving ? 'hourglass_top' : 'cable'}</span>
+              {saving ? 'Saving…' : 'Save & connect'}
+            </button>
+          </div>
+
         </form>
       </div>
+
+      {saveDiffModal.open && (
+        <div
+          role="presentation"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1200,
+            background: 'rgba(0,0,0,0.65)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+          }}
+          onClick={() => {
+            if (!saving) setSaveDiffModal({ open: false, changes: [], pending: null, runVpnProbeAfter: false });
+          }}
+        >
+          <div
+            className="glass-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="save-diff-title"
+            style={{ maxWidth: '640px', width: '100%', maxHeight: '80vh', overflow: 'auto', padding: '24px' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 id="save-diff-title" style={{ margin: '0 0 12px 0', fontSize: '18px', fontWeight: 600 }}>
+              Confirm configuration changes
+            </h3>
+            <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0', lineHeight: 1.5 }}>
+              Saving recreates the Gluetun container with the merged environment. Secret values are redacted below.
+            </p>
+            <div className="custom-scrollbar" style={{ maxHeight: '42vh', overflow: 'auto', border: '1px solid var(--glass-border)', borderRadius: '8px', marginBottom: '16px' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                <thead>
+                  <tr style={{ background: 'var(--surface-2)', textAlign: 'left' }}>
+                    <th style={{ padding: '8px 10px' }}>Key</th>
+                    <th style={{ padding: '8px 10px' }}>Before</th>
+                    <th style={{ padding: '8px 10px' }}>After</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {saveDiffModal.changes.map((row) => (
+                    <tr key={row.key} style={{ borderTop: '1px solid var(--glass-border)' }}>
+                      <td style={{ padding: '8px 10px', fontFamily: 'monospace', wordBreak: 'break-all' }}>{row.key}</td>
+                      <td style={{ padding: '8px 10px', wordBreak: 'break-all', color: 'var(--text-secondary)' }}>{row.before || '—'}</td>
+                      <td style={{ padding: '8px 10px', wordBreak: 'break-all' }}>{row.after || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+              <button type="button" className="btn" disabled={saving} onClick={() => setSaveDiffModal({ open: false, changes: [], pending: null, runVpnProbeAfter: false })}>
+                Cancel
+              </button>
+              <button type="button" className="btn btn-primary" disabled={saving} onClick={confirmSaveAfterDiff}>
+                {saving ? 'Saving…' : (saveDiffModal.runVpnProbeAfter ? 'Save, apply & test VPN' : 'Save & apply')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

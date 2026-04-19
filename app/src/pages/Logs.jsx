@@ -10,6 +10,8 @@ export default function Logs() {
   const [logLevel, setLogLevel] = useState('info');
   const [loadingConfig, setLoadingConfig] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [logStreamMode, setLogStreamMode] = useState('tail');
+  const [logTail, setLogTail] = useState(100);
   const isPausedRef = useRef(isPaused);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
@@ -49,7 +51,11 @@ export default function Logs() {
       })
       .catch(console.error);
 
-    const eventSource = new EventSource(`/api/logs?token=${token}`);
+    const qs =
+      logStreamMode === 'live'
+        ? `token=${encodeURIComponent(token)}&mode=live`
+        : `token=${encodeURIComponent(token)}&tail=${encodeURIComponent(String(logTail))}`;
+    const eventSource = new EventSource(`/api/logs?${qs}`);
 
     eventSource.onmessage = (event) => {
       if (isPausedRef.current) return;
@@ -69,7 +75,7 @@ export default function Logs() {
     };
 
     return () => eventSource.close();
-  }, [maybeNotifyLogAlert]);
+  }, [maybeNotifyLogAlert, logStreamMode, logTail]);
 
   useEffect(() => {
     if (autoScroll && logsContainerRef.current) {
@@ -140,10 +146,44 @@ export default function Logs() {
       </header>
 
       <div style={{ 
-        display: 'flex', gap: '20px', alignItems: 'center', 
+        display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap',
         background: 'var(--glass-bg)', padding: '12px 20px', borderRadius: '12px', 
         border: '1px solid var(--glass-border)' 
       }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <label style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            Stream
+            <select
+              className="select-input"
+              style={{ minWidth: '140px' }}
+              value={logStreamMode}
+              onChange={(e) => {
+                setLogs([]);
+                setLogStreamMode(e.target.value);
+              }}
+            >
+              <option value="tail">Last N lines + follow</option>
+              <option value="live">From now (live only)</option>
+            </select>
+          </label>
+          {logStreamMode === 'tail' && (
+            <label style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              N
+              <select
+                className="select-input"
+                value={String(logTail)}
+                onChange={(e) => {
+                  setLogs([]);
+                  setLogTail(Number(e.target.value));
+                }}
+              >
+                {[50, 100, 250, 500, 1000, 2000].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
         <div style={{ flex: 1, position: 'relative' }}>
           <span className="material-icons-round" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)', fontSize: '20px' }}>search</span>
           <input 
@@ -173,6 +213,42 @@ export default function Logs() {
           </button>
           <button onClick={() => setLogs([])} className="btn" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', padding: '8px 16px', fontSize: '14px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
             <span className="material-icons-round" style={{ fontSize: '18px' }}>delete_sweep</span> Clear
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const lines = filteredLogs.length ? filteredLogs : logs;
+              const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `gluetun-gui-logs-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+              notify({ level: 'success', title: 'Log snapshot saved', message: `${lines.length} lines`, source: 'logs', dedupeKey: 'logs_download' });
+            }}
+            className="btn"
+            style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--accent-primary)', padding: '8px 16px', fontSize: '14px', border: '1px solid rgba(59, 130, 246, 0.25)' }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>download</span> Download
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const text = (filteredLogs.length ? filteredLogs : logs).join('\n');
+              try {
+                await navigator.clipboard.writeText(text);
+                notify({ level: 'success', title: 'Copied', message: 'Visible log lines copied to clipboard.', source: 'logs', dedupeKey: 'logs_copy' });
+              } catch {
+                notify({ level: 'error', title: 'Copy failed', message: 'Clipboard permission denied or unavailable.', source: 'logs', dedupeKey: 'logs_copy_err' });
+              }
+            }}
+            className="btn"
+            style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)', padding: '8px 16px', fontSize: '14px', border: '1px solid var(--glass-border)' }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>content_copy</span> Copy visible
           </button>
         </div>
       </div>

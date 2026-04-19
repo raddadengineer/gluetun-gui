@@ -4,15 +4,19 @@ const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
-const { exec } = require('child_process');
+const { exec, execFile } = require('child_process');
 const https = require('https');
+const http = require('http');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Hardcoded for local GUI, but perfectly limits unauthorized access
-const JWT_SECRET = 'gluetun-gui-super-secret-key';
+const JWT_SECRET =
+    process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim()
+        ? String(process.env.JWT_SECRET).trim()
+        : 'gluetun-gui-super-secret-key';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN && String(process.env.JWT_EXPIRES_IN).trim() ? String(process.env.JWT_EXPIRES_IN).trim() : '24h';
 
 // ─── Data Directory ───────────────────────────────────────────────────────────
 // DATA_DIR env var centralises all persistent state under one folder.
@@ -35,6 +39,15 @@ const GLUETUN_ENV_PATH = DATA_DIR
 const WG_CONFIG_DIR = DATA_DIR
     ? path.join(DATA_DIR, 'wireguard')
     : '/config';
+const VPN_CONNECTIVITY_STATE_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'vpn-connectivity-state.json')
+    : path.join(__dirname, 'vpn-connectivity-state.json');
+const HOMELAB_STATE_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'gui-homelab-state.json')
+    : path.join(__dirname, 'gui-homelab-state.json');
+const CONFIG_DIFF_HISTORY_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'config-diff-history.json')
+    : path.join(__dirname, 'config-diff-history.json');
 if (DATA_DIR && !fs.existsSync(WG_CONFIG_DIR)) {
     fs.mkdirSync(WG_CONFIG_DIR, { recursive: true });
 }
@@ -227,7 +240,7 @@ app.post('/api/login', (req, res) => {
 
     if (password === expectedPassword) {
         // Issue token valid for 24 hours
-        const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
+        const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
         res.json({ token, message: 'Authenticated Successfully' });
     } else {
         res.status(401).json({ error: 'Invalid password' });
@@ -261,6 +274,24 @@ app.get('/api/status', authenticateToken, async (req, res) => {
         // Prefer GUI-selected provider label for display (e.g. PIA WireGuard uses VPN_SERVICE_PROVIDER=custom in container)
         const displayProvider = guiEnv.VPN_SERVICE_PROVIDER || null;
 
+        const lastVpnConnectivityCheck = loadVpnConnectivityState();
+        let imageUpdate = null;
+        try {
+            const imgName = containerInfo.Config.Image;
+            const localDigest = extractLocalImageDigest(containerInfo);
+            const { remoteDigest, error } = await fetchDockerHubManifestDigest(imgName);
+            const norm = (d) => (d ? String(d).replace(/^sha256:/i, '').toLowerCase() : '');
+            imageUpdate = {
+                localDigest,
+                remoteDigest: remoteDigest || null,
+                updateAvailable: !!(localDigest && remoteDigest && norm(localDigest) !== norm(remoteDigest)),
+                checkError: error || null,
+                checkedAt: new Date().toISOString(),
+            };
+        } catch (e) {
+            imageUpdate = { checkError: e.message, checkedAt: new Date().toISOString() };
+        }
+
         res.json({
             status: containerInfo.State.Status,
             id: containerInfo.Id,
@@ -275,7 +306,10 @@ app.get('/api/status', authenticateToken, async (req, res) => {
                 VPN_TYPE: guiEnv.VPN_TYPE || null,
                 PIA_PORT_FORWARDING: guiEnv.PIA_PORT_FORWARDING || null,
             },
-            displayProvider
+            displayProvider,
+            lastVpnConnectivityCheck,
+            imageUpdate,
+            homelab: loadHomelabState(),
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -371,6 +405,18 @@ app.get('/api/logs', authenticateToken, async (req, res) => {
     try {
         const containers = await docker.listContainers({ all: true });
         
+        const mode = String(req.query.mode || '');
+        const liveOnly = mode === 'live' || String(req.query.from || '') === 'now';
+        let tailN = parseInt(String(req.query.tail || '100'), 10);
+        if (!Number.isFinite(tailN) || tailN < 1) tailN = 100;
+        if (tailN > 5000) tailN = 5000;
+        const logOpts = { follow: true, stdout: true, stderr: true, timestamps: false };
+        if (liveOnly) {
+            logOpts.since = Math.floor(Date.now() / 1000);
+        } else {
+            logOpts.tail = tailN;
+        }
+
         const attachStream = async (containerName, prefix) => {
             const cInfo = containers.find(c => c.Names.some(n => n === `/${containerName}`));
             if (!cInfo) {
@@ -378,7 +424,7 @@ app.get('/api/logs', authenticateToken, async (req, res) => {
                 return;
             }
             const container = docker.getContainer(cInfo.Id);
-            const stream = await container.logs({ follow: true, stdout: true, stderr: true, tail: 100 });
+            const stream = await container.logs(logOpts);
             logStreams.push(stream);
             
             stream.on('data', (chunk) => {
@@ -580,6 +626,17 @@ app.get('/api/config', authenticateToken, async (req, res) => {
             }
         }
 
+        // Gluetun parses UPDATER_PERIOD with Go duration syntax; bare "12" errors — treat bare numbers as hours
+        if (config.UPDATER_PERIOD !== undefined && config.UPDATER_PERIOD !== null && String(config.UPDATER_PERIOD).trim() !== '') {
+            const before = String(config.UPDATER_PERIOD).trim();
+            const after = normalizeGluetunUpdaterPeriod(config.UPDATER_PERIOD);
+            if (after !== before) {
+                config.UPDATER_PERIOD = after;
+                didMigrate = true;
+                console.log('[Config] Migrated UPDATER_PERIOD for Gluetun:', JSON.stringify(before), '→', after);
+            }
+        }
+
         // Persist migrated values back to .env so Gluetun never sees stale/deprecated vars
         if (didMigrate || didPiaOpenVpnRegionMigrate) {
             let newEnv = '';
@@ -597,6 +654,17 @@ app.get('/api/config', authenticateToken, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+/** Gluetun expects Go duration strings (e.g. 24h, 30m). Bare integers error at parse time. */
+function normalizeGluetunUpdaterPeriod(value) {
+    if (value === undefined || value === null) return undefined;
+    const s = String(value).trim();
+    if (s === '') return '';
+    if (s === '0') return '0';
+    if (/[a-zA-Zµ]+$/.test(s)) return s;
+    if (/^-?\d+(\.\d+)?$/.test(s)) return `${s}h`;
+    return s;
+}
 
 /** Persist GUI .env and recreate Gluetun (same pipeline as POST /api/config). */
 async function applyGuiConfiguration(config) {
@@ -620,6 +688,17 @@ async function applyGuiConfiguration(config) {
         }
     }
 
+    if (config.UPDATER_PERIOD !== undefined && config.UPDATER_PERIOD !== null && String(config.UPDATER_PERIOD).trim() !== '') {
+        const before = String(config.UPDATER_PERIOD).trim();
+        const after = normalizeGluetunUpdaterPeriod(config.UPDATER_PERIOD);
+        if (after !== before) {
+            config.UPDATER_PERIOD = after;
+            console.log('[Config] NORMALIZE UPDATER_PERIOD for Gluetun:', JSON.stringify(before), '→', after);
+        }
+    }
+
+    const beforeGui = parseEnvFileToMap(ENV_PATH);
+
     let envContent = '';
     for (const [key, value] of Object.entries(config)) {
         if (value !== undefined && value !== null && value.toString().trim() !== '' && value !== 'undefined') {
@@ -628,7 +707,25 @@ async function applyGuiConfiguration(config) {
     }
     fs.writeFileSync(ENV_PATH, envContent, 'utf8');
 
-    const guiOnlyKeys = ['GUI_PASSWORD', 'PIA_USERNAME', 'PIA_PASSWORD', 'PIA_REGIONS', 'PIA_WG_REGIONS', 'PIA_OPENVPN_REGIONS', 'PIA_ROTATION_RETRIES', 'PIA_ROTATION_COUNT', 'PIA_REGION_INDEX'];
+    const guiOnlyKeys = [
+        'GUI_PASSWORD',
+        'PIA_USERNAME',
+        'PIA_PASSWORD',
+        'PIA_REGIONS',
+        'PIA_WG_REGIONS',
+        'PIA_OPENVPN_REGIONS',
+        'PIA_ROTATION_RETRIES',
+        'PIA_ROTATION_COUNT',
+        'PIA_REGION_INDEX',
+        'GUI_NOTIFY_WEBHOOK_URL',
+        'GUI_NOTIFY_WEBHOOK_SECRET',
+        'GUI_NOTIFY_QUIET_ENABLED',
+        'GUI_NOTIFY_QUIET_START',
+        'GUI_NOTIFY_QUIET_END',
+        'GUI_BACKUP_INTERVAL_HOURS',
+        'GUI_BACKUP_RETENTION',
+        'GUI_DIFF_HISTORY_MAX',
+    ];
     const gluetunEnv = { ...config };
     guiOnlyKeys.forEach(k => delete gluetunEnv[k]);
 
@@ -737,7 +834,18 @@ async function applyGuiConfiguration(config) {
         }
     }
 
-    return recreateGluetunContainer(gluetunEnv);
+    const beforeGluetun = parseEnvFileToMap(GLUETUN_ENV_PATH);
+    const containerDiff = computeConfigDiff(beforeGluetun, gluetunEnv);
+    const recreateMessage = await recreateGluetunContainer(gluetunEnv);
+    const afterGui = parseEnvFileToMap(ENV_PATH);
+    const guiChanges = computeConfigDiff(beforeGui, afterGui);
+    if (guiChanges.length) appendConfigDiffHistory(guiChanges);
+    mergeHomelabState({ lastConfigSaveAt: new Date().toISOString() });
+    return {
+        message: recreateMessage,
+        containerDiff,
+        guiChangeCount: guiChanges.length,
+    };
 }
 
 function parseEnvImportText(raw) {
@@ -777,6 +885,381 @@ function redactEnvTextForExport(text) {
     }).join('\n');
 }
 
+function shouldRedactKeyForDiff(key) {
+    const exact = /^(GUI_PASSWORD|PIA_PASSWORD|OPENVPN_PASSWORD|WIREGUARD_PRIVATE_KEY|WIREGUARD_PRESHARED_KEY|OPENVPN_KEY_PASSPHRASE|VPN_PORT_FORWARDING_PASSWORD|HTTPPROXY_PASSWORD|SHADOWSOCKS_PASSWORD|PUBLICIP_API_TOKEN|UPDATER_PROTONVPN_PASSWORD|OPENVPN_KEY|OPENVPN_ENCRYPTED_KEY|OPENVPN_CERT|GUI_NOTIFY_WEBHOOK_SECRET)$/i;
+    const loose = /PASSWORD|_SECRET$|_TOKEN$|PRIVATE_KEY|PRESHARED/i;
+    return exact.test(key) || loose.test(key);
+}
+
+function parseEnvFileToMap(envPath) {
+    const o = {};
+    if (!fs.existsSync(envPath)) return o;
+    fs.readFileSync(envPath, 'utf8').split('\n').forEach((line) => {
+        if (line && line.includes('=')) {
+            const parts = line.split('=');
+            o[parts[0]] = parts.slice(1).join('=').trim();
+        }
+    });
+    return o;
+}
+
+function computeConfigDiff(currentFlat, proposedFlat) {
+    const keys = new Set([...Object.keys(currentFlat || {}), ...Object.keys(proposedFlat || {})]);
+    const changes = [];
+    for (const k of keys) {
+        if (k.startsWith('_')) continue;
+        const a = currentFlat[k] !== undefined && currentFlat[k] !== null ? String(currentFlat[k]) : '';
+        const b = proposedFlat[k] !== undefined && proposedFlat[k] !== null ? String(proposedFlat[k]) : '';
+        if (a === b) continue;
+        changes.push({
+            key: k,
+            before: shouldRedactKeyForDiff(k) ? (a ? '__REDACTED__' : '') : a,
+            after: shouldRedactKeyForDiff(k) ? (b ? '__REDACTED__' : '') : b,
+        });
+    }
+    changes.sort((x, y) => x.key.localeCompare(y.key));
+    return changes;
+}
+
+function loadVpnConnectivityState() {
+    try {
+        if (!fs.existsSync(VPN_CONNECTIVITY_STATE_PATH)) return null;
+        return JSON.parse(fs.readFileSync(VPN_CONNECTIVITY_STATE_PATH, 'utf8'));
+    } catch (e) {
+        return null;
+    }
+}
+
+function loadHomelabState() {
+    try {
+        if (!fs.existsSync(HOMELAB_STATE_PATH)) return {};
+        const j = JSON.parse(fs.readFileSync(HOMELAB_STATE_PATH, 'utf8'));
+        return j && typeof j === 'object' ? j : {};
+    } catch {
+        return {};
+    }
+}
+
+function mergeHomelabState(patch) {
+    try {
+        const cur = loadHomelabState();
+        const next = { ...cur, ...patch };
+        fs.writeFileSync(HOMELAB_STATE_PATH, JSON.stringify(next, null, 2), 'utf8');
+    } catch (e) {
+        console.error('[Homelab] Failed to persist state:', e.message);
+    }
+}
+
+function appendConfigDiffHistory(changes) {
+    if (!DATA_DIR || !changes || !changes.length) return;
+    const gui = readGuiEnv();
+    const max = Math.min(200, Math.max(5, parseInt(String(gui.GUI_DIFF_HISTORY_MAX || '30'), 10) || 30));
+    let arr = [];
+    try {
+        if (fs.existsSync(CONFIG_DIFF_HISTORY_PATH)) {
+            arr = JSON.parse(fs.readFileSync(CONFIG_DIFF_HISTORY_PATH, 'utf8'));
+        }
+    } catch {
+        arr = [];
+    }
+    if (!Array.isArray(arr)) arr = [];
+    arr.push({
+        at: new Date().toISOString(),
+        changeCount: changes.length,
+        changes,
+    });
+    arr = arr.slice(-max);
+    fs.writeFileSync(CONFIG_DIFF_HISTORY_PATH, JSON.stringify(arr, null, 2), 'utf8');
+}
+
+function parseHmToMinutes(s) {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '').trim());
+    if (!m) return null;
+    const h = parseInt(m[1], 10);
+    const min = parseInt(m[2], 10);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return h * 60 + min;
+}
+
+function isWebhookQuietNow(gui) {
+    const raw = String(gui.GUI_NOTIFY_QUIET_ENABLED || '').toLowerCase();
+    if (!['on', 'true', '1', 'yes'].includes(raw)) return false;
+    const start = parseHmToMinutes(gui.GUI_NOTIFY_QUIET_START || '22:00');
+    const end = parseHmToMinutes(gui.GUI_NOTIFY_QUIET_END || '07:00');
+    if (start === null || end === null) return false;
+    const now = new Date();
+    const cur = now.getHours() * 60 + now.getMinutes();
+    if (start === end) return false;
+    if (start < end) return cur >= start && cur < end;
+    return cur >= start || cur < end;
+}
+
+function pruneOldBackups(backupsDir, retention) {
+    try {
+        if (!fs.existsSync(backupsDir)) return;
+        const files = fs
+            .readdirSync(backupsDir)
+            .filter((f) => f.endsWith('.tar.gz'))
+            .map((f) => {
+                const p = path.join(backupsDir, f);
+                const st = fs.statSync(p);
+                return { p, f, m: st.mtimeMs };
+            })
+            .sort((a, b) => b.m - a.m);
+        for (let i = retention; i < files.length; i++) {
+            fs.unlinkSync(files[i].p);
+        }
+    } catch (e) {
+        console.error('[Backup] Prune failed:', e.message);
+    }
+}
+
+function runDataBackup() {
+    return new Promise((resolve) => {
+        if (!DATA_DIR) {
+            resolve({ ok: false, error: 'DATA_DIR not set' });
+            return;
+        }
+        const backupsDir = path.join(DATA_DIR, 'backups');
+        try {
+            if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+        } catch (e) {
+            resolve({ ok: false, error: e.message });
+            return;
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+        const filename = `gluetun-gui-backup-${stamp}.tar.gz`;
+        const outPath = path.join(backupsDir, filename);
+        const members = [];
+        for (const rel of ['gui-config.env', 'sessions.json', 'vpn-connectivity-state.json', 'gluetun.env']) {
+            if (fs.existsSync(path.join(DATA_DIR, rel))) members.push(rel);
+        }
+        if (fs.existsSync(path.join(DATA_DIR, 'wireguard'))) members.push('wireguard');
+        if (members.length === 0) {
+            resolve({ ok: false, error: 'No files to back up' });
+            return;
+        }
+        const gui = readGuiEnv();
+        const retention = Math.min(500, Math.max(1, parseInt(String(gui.GUI_BACKUP_RETENTION || '10'), 10) || 10));
+        const args = ['-czf', outPath, '-C', DATA_DIR, ...members];
+        execFile('tar', args, { timeout: 120000 }, (err) => {
+            if (err) {
+                mergeHomelabState({ lastBackupError: err.message, lastBackupAt: new Date().toISOString() });
+                resolve({ ok: false, error: err.message });
+                return;
+            }
+            pruneOldBackups(backupsDir, retention);
+            const at = new Date().toISOString();
+            mergeHomelabState({
+                lastBackupAt: at,
+                lastBackupError: null,
+                lastBackupFile: filename,
+            });
+            resolve({ ok: true, filename, path: outPath, savedAt: at });
+        });
+    });
+}
+
+function saveVpnConnectivityState(obj) {
+    try {
+        fs.writeFileSync(VPN_CONNECTIVITY_STATE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+        mergeHomelabState({
+            lastVpnConnectivityProbeAt: obj.at || new Date().toISOString(),
+        });
+    } catch (e) {
+        console.error('[VPN-Check] Failed to persist state:', e.message);
+    }
+}
+
+let imageDigestCache = { at: 0, imageRef: null, remoteDigest: null, error: null };
+
+function extractLocalImageDigest(inspect) {
+    const digests = inspect?.RepoDigests || [];
+    const cfgImg = inspect?.Config?.Image || '';
+    const base = cfgImg.includes(':') && !cfgImg.endsWith(':latest') ? cfgImg.split(':')[0] : cfgImg.replace(/:latest$/, '');
+    const match = digests.find((d) => base && d.startsWith(base.split('@')[0])) || digests[0];
+    const m = match && match.match(/(sha256:[a-f0-9]{64})/i);
+    if (m) return m[1];
+    const id = inspect?.Image || '';
+    const m2 = typeof id === 'string' && id.includes('sha256:') ? id.match(/(sha256:[a-f0-9]{64})/i) : null;
+    return m2 ? m2[1] : null;
+}
+
+function parseImageRepoAndTag(imageStr) {
+    if (!imageStr || typeof imageStr !== 'string') return null;
+    let s = imageStr.replace(/^docker\.io\//, '');
+    const at = s.indexOf('@');
+    if (at !== -1) s = s.slice(0, at);
+    const lastColon = s.lastIndexOf(':');
+    const lastSlash = s.lastIndexOf('/');
+    const hasTag = lastColon > lastSlash;
+    const repo = hasTag ? s.slice(0, lastColon) : s;
+    const tag = hasTag ? s.slice(lastColon + 1) : 'latest';
+    return { repo, tag };
+}
+
+async function fetchDockerHubManifestDigest(imageStr) {
+    const parsed = parseImageRepoAndTag(imageStr);
+    if (!parsed) return { remoteDigest: null, error: 'bad-image' };
+    const { repo, tag } = parsed;
+    const scopeRepo = repo.split('/')[0];
+    if (scopeRepo.includes('.')) {
+        return { remoteDigest: null, error: 'non-docker-hub-registry' };
+    }
+    const now = Date.now();
+    const cacheKey = `${repo}:${tag}`;
+    if (
+        imageDigestCache.imageRef === cacheKey &&
+        now - imageDigestCache.at < 3600000 &&
+        imageDigestCache.remoteDigest
+    ) {
+        return { remoteDigest: imageDigestCache.remoteDigest, error: imageDigestCache.error };
+    }
+    try {
+        const token = await new Promise((resolve, reject) => {
+            const scope = encodeURIComponent(`repository:${repo}:pull`);
+            const u = `https://auth.docker.io/token?service=registry.docker.io&scope=${scope}`;
+            https.get(u, (r) => {
+                let d = '';
+                r.on('data', (c) => (d += c));
+                r.on('end', () => {
+                    try {
+                        resolve(JSON.parse(d).token);
+                    } catch (e) {
+                        reject(e);
+                    }
+                });
+            }).on('error', reject);
+        });
+        const digest = await new Promise((resolve, reject) => {
+            const opts = {
+                hostname: 'registry-1.docker.io',
+                path: `/v2/${repo}/manifests/${encodeURIComponent(tag)}`,
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    Accept: 'application/vnd.docker.distribution.manifest.v2+json',
+                },
+            };
+            https.get(opts, (r) => {
+                let body = '';
+                r.on('data', (c) => (body += c));
+                r.on('end', () => {
+                    const dh = r.headers['docker-content-digest'];
+                    if (r.statusCode === 200 && dh) resolve(dh);
+                    else reject(new Error(`registry HTTP ${r.statusCode}`));
+                });
+            }).on('error', reject);
+        });
+        imageDigestCache = { at: now, imageRef: cacheKey, remoteDigest: digest, error: null };
+        return { remoteDigest: digest, error: null };
+    } catch (e) {
+        imageDigestCache = { at: now, imageRef: cacheKey, remoteDigest: null, error: e.message };
+        return { remoteDigest: null, error: e.message };
+    }
+}
+
+const NOTIFY_THROTTLE_MS = 120000;
+let notifyWebhookLastByEvent = {};
+let lastMissingContainerWebhookAt = 0;
+
+function notifyWebhook(event, payload) {
+    const gui = readGuiEnv();
+    const url = String(gui.GUI_NOTIFY_WEBHOOK_URL || '').trim();
+    if (!url) return;
+    if (isWebhookQuietNow(gui)) {
+        console.log('[Notify] Webhook suppressed (quiet hours):', event);
+        return;
+    }
+    const now = Date.now();
+    if (event === 'gluetun_container_missing') {
+        if (now - lastMissingContainerWebhookAt < 5 * 60 * 1000) return;
+        lastMissingContainerWebhookAt = now;
+    } else {
+        const t = notifyWebhookLastByEvent[event] || 0;
+        if (now - t < NOTIFY_THROTTLE_MS) return;
+        notifyWebhookLastByEvent[event] = now;
+    }
+    let u;
+    try {
+        u = new URL(url);
+    } catch (e) {
+        console.error('[Notify] Invalid GUI_NOTIFY_WEBHOOK_URL:', e.message);
+        return;
+    }
+    const secret = String(gui.GUI_NOTIFY_WEBHOOK_SECRET || '').trim();
+    const body = JSON.stringify({
+        event,
+        source: 'gluetun-gui',
+        timestamp: new Date().toISOString(),
+        ...(payload && typeof payload === 'object' ? payload : {}),
+    });
+    const opts = {
+        method: 'POST',
+        hostname: u.hostname,
+        port: u.port || (u.protocol === 'https:' ? 443 : 80),
+        path: u.pathname + u.search,
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+        },
+    };
+    if (secret) opts.headers.Authorization = `Bearer ${secret}`;
+    const lib = u.protocol === 'https:' ? https : http;
+    const reqOut = lib.request(opts, (resOut) => {
+        const code = resOut.statusCode || 0;
+        const ok = code >= 200 && code < 300;
+        mergeHomelabState({
+            lastWebhook: {
+                at: new Date().toISOString(),
+                ok,
+                event,
+                statusCode: code,
+                error: null,
+            },
+        });
+        resOut.resume();
+    });
+    reqOut.on('error', (e) => {
+        console.error('[Notify] Webhook error:', e.message);
+        mergeHomelabState({
+            lastWebhook: {
+                at: new Date().toISOString(),
+                ok: false,
+                event,
+                statusCode: null,
+                error: e.message,
+            },
+        });
+    });
+    reqOut.write(body);
+    reqOut.end();
+    console.log('[Notify] POST webhook:', event);
+}
+
+app.post('/api/config/preview-diff', authenticateToken, (req, res) => {
+    try {
+        const current = parseEnvFileToMap(ENV_PATH);
+        const proposed = req.body && typeof req.body === 'object' ? req.body : {};
+        const changes = computeConfigDiff(current, proposed);
+        res.json({ changes, changeCount: changes.length });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/config/diff-history', authenticateToken, (req, res) => {
+    try {
+        if (!fs.existsSync(CONFIG_DIFF_HISTORY_PATH)) {
+            return res.json({ entries: [] });
+        }
+        const raw = JSON.parse(fs.readFileSync(CONFIG_DIFF_HISTORY_PATH, 'utf8'));
+        const entries = Array.isArray(raw) ? raw : [];
+        res.json({ entries });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/config/export', authenticateToken, (req, res) => {
     try {
         if (!fs.existsSync(ENV_PATH)) {
@@ -804,8 +1287,13 @@ app.post('/api/config/import', authenticateToken, async (req, res) => {
         if (dryRun) {
             return res.json({ ok: true, keyCount: Object.keys(config).length });
         }
-        const msg = await applyGuiConfiguration(config);
-        res.json({ message: `Imported and saved. ${msg}`, keyCount: Object.keys(config).length });
+        const out = await applyGuiConfiguration(config);
+        res.json({
+            message: `Imported and saved. ${out.message}`,
+            keyCount: Object.keys(config).length,
+            containerDiff: out.containerDiff,
+            guiChangeCount: out.guiChangeCount,
+        });
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
@@ -813,8 +1301,12 @@ app.post('/api/config/import', authenticateToken, async (req, res) => {
 
 app.post('/api/config', authenticateToken, async (req, res) => {
     try {
-        const msg = await applyGuiConfiguration(req.body);
-        res.json({ message: `Settings saved to .env. ${msg}` });
+        const out = await applyGuiConfiguration(req.body);
+        res.json({
+            message: `Settings saved to .env. ${out.message}`,
+            containerDiff: out.containerDiff,
+            guiChangeCount: out.guiChangeCount,
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -829,7 +1321,11 @@ async function fetchGluetunServers() {
         return gluetunServersCache;
     }
     return new Promise((resolve, reject) => {
-        https.get('https://raw.githubusercontent.com/qdm12/gluetun/master/internal/storage/servers.json', (res) => {
+        const url = 'https://raw.githubusercontent.com/qdm12/gluetun/master/internal/storage/servers.json';
+        const opts = {
+            headers: { 'User-Agent': 'gluetun-gui/1.0 (+https://github.com/qdm12/gluetun)' },
+        };
+        https.get(url, opts, (res) => {
             if (res.statusCode !== 200) return reject(new Error('Failed to fetch servers.json'));
             let data = '';
             res.on('data', chunk => data += chunk);
@@ -844,6 +1340,26 @@ async function fetchGluetunServers() {
             });
         }).on('error', reject);
     });
+}
+
+function isPiaProviderName(provider) {
+    return String(provider || '').trim().toLowerCase() === 'private internet access';
+}
+
+/** Resolve GUI `VPN_SERVICE_PROVIDER` to a Gluetun `servers.json` provider block (keys are lowercase, e.g. `private internet access`). */
+function findServersJsonProvider(serversData, provider) {
+    const raw = String(provider || '').trim();
+    if (!raw) return null;
+    const direct = serversData[raw];
+    if (direct && typeof direct === 'object' && Array.isArray(direct.servers)) return direct;
+    const low = raw.toLowerCase();
+    for (const key of Object.keys(serversData)) {
+        if (key === 'version') continue;
+        const block = serversData[key];
+        if (!block || typeof block !== 'object' || !Array.isArray(block.servers)) continue;
+        if (key.toLowerCase() === low) return block;
+    }
+    return null;
 }
 
 /**
@@ -964,8 +1480,23 @@ async function sanitizePiaOpenVpnServerSelection(config) {
 
 app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
     try {
-        const { provider, vpnType, country, region, portForwardOnly } = req.query;
-        if (!provider) return res.status(400).json({ error: 'Missing provider' });
+        const { provider: providerRaw, vpnType, country, region, portForwardOnly } = req.query;
+        const provider = typeof providerRaw === 'string' ? providerRaw : Array.isArray(providerRaw) ? providerRaw[0] : '';
+        if (!provider) {
+            console.warn('[ServerList] /api/helpers/servers: rejected (missing provider)');
+            return res.status(400).json({ error: 'Missing provider' });
+        }
+
+        console.log(
+            '[ServerList] /api/helpers/servers request:',
+            JSON.stringify({
+                provider,
+                vpnType: vpnType || null,
+                portForwardOnly: portForwardOnly === '1' || portForwardOnly === 'true' || false,
+                country: country || null,
+                region: region || null,
+            }),
+        );
 
         const result = {
             countries: new Set(),
@@ -979,7 +1510,7 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
         const targetVpnType = vpnType === 'wireguard' ? 'wireguard' : 'openvpn';
 
         // PIA WireGuard relies natively on the API since it's dynamic
-        if (provider === 'private internet access' && targetVpnType === 'wireguard') {
+        if (isPiaProviderName(provider) && targetVpnType === 'wireguard') {
             const data = await new Promise((resolve, reject) => {
                 https.get('https://serverlist.piaservers.net/vpninfo/servers/v6', (resp) => {
                     let raw = '';
@@ -990,6 +1521,10 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
             const jsonStr = data.split('\n')[0];
             const parsed = JSON.parse(jsonStr);
             const regions = parsed.regions.filter(r => !r.offline);
+            const offline = parsed.regions.length - regions.length;
+            console.log(
+                `[ServerList] /api/helpers/servers: PIA WireGuard → ${regions.length} online regions from PIA API (${offline} offline skipped)`,
+            );
             return res.json({
                 countries: [],
                 regions: regions.map(r => r.name).sort((a, b) => a.localeCompare(b)),
@@ -1001,15 +1536,21 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
 
         // Fetch Master Gluetun servers.json
         const serversData = await fetchGluetunServers();
-        const providerData = serversData[provider];
-        if (!providerData || !providerData.servers) {
+        const providerData = findServersJsonProvider(serversData, provider);
+        if (!providerData) {
+            console.warn(`[ServerList] /api/helpers/servers: unknown provider (no servers.json match): "${provider}"`);
             return res.json({
-                countries: [], regions: [], cities: [], hostnames: [], server_names: []
+                countries: [],
+                regions: [],
+                cities: [],
+                hostnames: [],
+                server_names: [],
+                unknownProvider: true,
             });
         }
 
         // PIA OpenVPN: Gluetun `SERVER_REGIONS` must be human-readable region labels (e.g. "DE Berlin"), not `server_name` (e.g. berlin422).
-        if (provider === 'private internet access' && targetVpnType === 'openvpn') {
+        if (isPiaProviderName(provider) && targetVpnType === 'openvpn') {
             const pfOnly = portForwardOnly === '1' || portForwardOnly === 'true';
             const filterCountries = country ? country.split(',').map((c) => c.trim().toLowerCase()) : null;
             const filterRegions = region ? region.split(',').map((r) => r.trim().toLowerCase()) : null;
@@ -1026,6 +1567,10 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
                 if (countryMatch && regionMatch && s.region) regionSet.add(s.region);
             }
             const regionsSorted = Array.from(regionSet).sort((a, b) => a.localeCompare(b));
+            console.log(
+                `[ServerList] /api/helpers/servers: PIA OpenVPN → ${regionsSorted.length} region labels from Gluetun servers.json` +
+                    (pfOnly ? ' (port-forward filter on)' : ''),
+            );
             return res.json({
                 countries: Array.from(countrySet).sort((a, b) => a.localeCompare(b)),
                 regions: regionsSorted,
@@ -1060,15 +1605,19 @@ app.get('/api/helpers/servers', authenticateToken, async (req, res) => {
             }
         });
 
-        res.json({
+        const payload = {
             countries: Array.from(result.countries).sort((a, b) => a.localeCompare(b)),
             regions: Array.from(result.regions).sort((a, b) => a.localeCompare(b)),
             cities: Array.from(result.cities).sort((a, b) => a.localeCompare(b)),
             hostnames: Array.from(result.hostnames).sort((a, b) => a.localeCompare(b)),
             server_names: Array.from(result.server_names).sort((a, b) => a.localeCompare(b))
-        });
+        };
+        console.log(
+            `[ServerList] /api/helpers/servers: ${provider} / ${targetVpnType} → countries=${payload.countries.length} regions=${payload.regions.length} cities=${payload.cities.length} hostnames=${payload.hostnames.length} server_names=${payload.server_names.length}`,
+        );
+        res.json(payload);
     } catch (err) {
-        console.error('[Helper-Servers] Error:', err.message);
+        console.error('[ServerList] /api/helpers/servers failed:', err.message, err.stack || '');
         res.status(500).json({ error: 'Failed to fetch server data' });
     }
 });
@@ -1299,9 +1848,13 @@ app.get('/api/pia/regions', async (req, res) => {
             .filter(r => !r.offline)
             .map(r => ({ id: r.id, name: r.name, portForward: r.port_forward }))
             .sort((a, b) => a.name.localeCompare(b.name));
+        const offline = parsed.regions.length - regions.length;
+        console.log(
+            `[ServerList] /api/pia/regions: ${regions.length} WireGuard regions from PIA (${offline} offline skipped)`,
+        );
         res.json(regions);
     } catch (err) {
-        console.error('[PIA-Regions] Error:', err.message);
+        console.error('[ServerList] /api/pia/regions failed:', err.message, err.stack || '');
         res.status(500).json({ error: 'Failed to fetch PIA regions' });
     }
 });
@@ -1366,6 +1919,8 @@ let failCount = 0;
 let pfFailCount = 0;
 let lastForwardedPort = null;
 let lastMonitoringSnapshot = null;
+let prevCheckVpnFailCount = 0;
+let prevCheckVpnPfFailCount = 0;
 const FAIL_THRESHOLD = 3;
 const CHECK_INTERVAL = 60 * 1000;          // 1 minute when failing
 const HEALTHY_INTERVAL = 15 * 60 * 1000;    // 15 minutes when healthy
@@ -1583,6 +2138,8 @@ async function executeFailoverRotation() {
 }
 
 async function checkVPN() {
+    mergeHomelabState({ lastMonitorTickAt: new Date().toISOString() });
+
     let monitoringData = {
         connected: false,
         portForwarding: false,
@@ -1597,6 +2154,7 @@ async function checkVPN() {
 
         if (!gluetun) {
             console.log('[Monitor] Gluetun container not found. Retrying...');
+            notifyWebhook('gluetun_container_missing', { message: 'Gluetun engine container not found' });
             return setTimeout(checkVPN, CHECK_INTERVAL);
         }
 
@@ -1629,6 +2187,12 @@ async function checkVPN() {
             if (ipResult.ok) {
                 monitoringData.publicIp = ipResult.publicIp || 'unknown';
                 monitoringData.connected = true;
+                if (prevCheckVpnFailCount >= FAIL_THRESHOLD) {
+                    notifyWebhook('vpn_connectivity_recovered', {
+                        publicIp: monitoringData.publicIp,
+                        method: ipResult.method,
+                    });
+                }
                 failCount = 0;
                 console.log(`[Monitor] VPN Connected (${ipResult.method}). Public IP: ${monitoringData.publicIp}`);
             } else {
@@ -1717,6 +2281,12 @@ async function checkVPN() {
     // 3. Handle Failures
     if (failCount >= FAIL_THRESHOLD || pfFailCount >= FAIL_THRESHOLD) {
         console.log(`[Monitor] Persistent failure detected (Fail: ${failCount}, PF-Fail: ${pfFailCount}). Executing Auto-Failover...`);
+        if (failCount >= FAIL_THRESHOLD) {
+            notifyWebhook('vpn_connectivity_failed', { failCount, pfFailCount, threshold: FAIL_THRESHOLD });
+        }
+        if (pfFailCount >= FAIL_THRESHOLD) {
+            notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: FAIL_THRESHOLD });
+        }
         try {
             await executeFailoverRotation();
             failCount = 0;
@@ -1726,6 +2296,9 @@ async function checkVPN() {
         }
         return setTimeout(checkVPN, CHECK_INTERVAL);
     }
+
+    prevCheckVpnFailCount = failCount;
+    prevCheckVpnPfFailCount = pfFailCount;
 
     // 4. Schedule next check
     const nextInterval = (failCount > 0 || pfFailCount > 0) ? CHECK_INTERVAL : HEALTHY_INTERVAL;
@@ -1758,32 +2331,173 @@ app.post('/api/test-failover', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/vpn/connectivity-test', authenticateToken, async (req, res) => {
+    const persist = (payload) => {
+        saveVpnConnectivityState({
+            ...payload,
+            at: new Date().toISOString(),
+        });
+    };
     try {
         const containers = await docker.listContainers({ all: true });
         const g = findGluetunEngineContainer(containers);
         if (!g) {
+            persist({ ok: false, error: 'Gluetun engine container not found', publicIp: null, method: null, detail: null });
             return res.status(404).json({ ok: false, error: 'Gluetun engine container not found' });
         }
         const container = docker.getContainer(g.Id);
         const inspectData = await container.inspect();
         if (inspectData.State.Status !== 'running') {
-            return res.json({
+            const body = {
                 ok: false,
                 error: `Container not running (${inspectData.State.Status})`,
                 containerStatus: inspectData.State.Status,
+            };
+            persist({
+                ok: false,
+                error: body.error,
+                publicIp: null,
+                method: 'inspect',
+                detail: inspectData.State.Status,
             });
+            return res.json(body);
         }
         const result = await probeOutboundVpn(container);
-        res.json(result.ok ? { ok: true, ...result } : { ok: false, ...result });
+        const out = result.ok ? { ok: true, ...result } : { ok: false, ...result };
+        persist({
+            ok: !!out.ok,
+            publicIp: out.publicIp || null,
+            method: out.method || null,
+            detail: out.detail || out.error || null,
+            error: out.ok ? null : out.error || out.detail || null,
+        });
+        res.json(out);
+    } catch (err) {
+        persist({ ok: false, error: err.message, publicIp: null, method: null, detail: err.message });
+        res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+app.get('/api/gluetun-control', authenticateToken, async (req, res) => {
+    let p = String(req.query.path || '/v1/portforward').trim();
+    if (!p.startsWith('/')) p = `/${p}`;
+    if (!/^\/v1\/[a-zA-Z0-9/_-]+$/.test(p)) {
+        return res.status(400).json({ error: 'path must look like /v1/... (letters, numbers, slash, underscore, hyphen)' });
+    }
+    try {
+        const containers = await docker.listContainers({ all: true });
+        const g = findGluetunEngineContainer(containers);
+        if (!g) return res.status(404).json({ error: 'Gluetun engine container not found' });
+        const container = docker.getContainer(g.Id);
+        const inspectData = await container.inspect();
+        if (inspectData.State.Status !== 'running') {
+            return res.status(503).json({ error: `Gluetun not running (${inspectData.State.Status})` });
+        }
+        const innerUrl = `http://127.0.0.1:8000${p}`;
+        const cmd = `wget -qO- --timeout=8 ${JSON.stringify(innerUrl)}`;
+        const ex = await container.exec({ Cmd: ['sh', '-c', cmd], AttachStdout: true, AttachStderr: true });
+        const stream = await ex.start();
+        const text = await collectExecOutput(stream, 12000);
+        const looksJson = /^\s*[\[{]/.test(text);
+        if (looksJson) {
+            try {
+                return res.json(JSON.parse(text));
+            } catch {
+                return res.type('text/plain; charset=utf-8').send(text);
+            }
+        }
+        res.type('text/plain; charset=utf-8').send(text || '');
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/compose-snippet', authenticateToken, async (req, res) => {
+    try {
+        const containers = await docker.listContainers({ all: true });
+        const gluetun = findGluetunEngineContainer(containers);
+        if (!gluetun) return res.status(404).json({ error: 'Gluetun engine container not found' });
+        const inspect = await docker.getContainer(gluetun.Id).inspect();
+        const name = (inspect.Name || '/gluetun').replace(/^\//, '');
+        const bindings = inspect.HostConfig?.PortBindings || {};
+        const portLines = [];
+        for (const [containerPort, hosts] of Object.entries(bindings)) {
+            if (!hosts || !hosts.length) continue;
+            const h = hosts[0];
+            portLines.push(`      - "${(h.HostPort || h.hostPort || '?')}:${containerPort.split('/')[0]}"`);
+        }
+        const snippet = [
+            '# Client service sharing Gluetun network namespace (outbound via VPN).',
+            '# Adjust image, env, and volumes for your app.',
+            'services:',
+            '  myapp:',
+            '    image: ghcr.io/your/image:latest',
+            `    network_mode: "service:${name}"`,
+            '    restart: unless-stopped',
+            '',
+            `# Published ports must stay on the "${name}" service in your Gluetun compose file.`,
+            ...(portLines.length
+                ? ['  # Example published ports on Gluetun (from current container):', `  # ${name}:`, '  #   ports:', ...portLines]
+                : ['  # No published port bindings detected on this Gluetun container.']),
+        ].join('\n');
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.send(`${snippet}\n`);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/homelab/backups', authenticateToken, (req, res) => {
+    try {
+        if (!DATA_DIR) return res.json({ backups: [] });
+        const dir = path.join(DATA_DIR, 'backups');
+        if (!fs.existsSync(dir)) return res.json({ backups: [] });
+        const backups = fs
+            .readdirSync(dir)
+            .filter((f) => f.endsWith('.tar.gz'))
+            .map((f) => {
+                const fp = path.join(dir, f);
+                const st = fs.statSync(fp);
+                return { name: f, size: st.size, mtime: st.mtime.toISOString() };
+            })
+            .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime));
+        res.json({ backups });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/homelab/backup-run', authenticateToken, async (req, res) => {
+    try {
+        const r = await runDataBackup();
+        if (!r.ok) return res.status(500).json(r);
+        res.json(r);
     } catch (err) {
         res.status(500).json({ ok: false, error: err.message });
     }
 });
 
+function maybeRunScheduledBackup() {
+    const gui = readGuiEnv();
+    const hrs = parseFloat(String(gui.GUI_BACKUP_INTERVAL_HOURS || '0'), 10);
+    if (!DATA_DIR || !Number.isFinite(hrs) || hrs <= 0) return;
+    const st = loadHomelabState();
+    const last = st.lastScheduledBackupAt ? Date.parse(st.lastScheduledBackupAt) : 0;
+    if (last && Date.now() - last < hrs * 3600000 - 60_000) return;
+    runDataBackup().then((r) => {
+        if (r.ok) mergeHomelabState({ lastScheduledBackupAt: new Date().toISOString() });
+    });
+}
+
 // Start checker after a short delay
 setTimeout(checkVPN, 15000);
+setInterval(maybeRunScheduledBackup, 15 * 60 * 1000);
 
 const PORT = 3000;
 app.listen(PORT, () => {
     console.log(`Gluetun GUI API server running on http://localhost:${PORT}`);
+    try {
+        maybeRunScheduledBackup();
+    } catch (e) {
+        console.error('[Backup] Initial scheduled check failed:', e.message);
+    }
 });
