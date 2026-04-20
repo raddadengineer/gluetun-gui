@@ -13,6 +13,23 @@ where version tags exist.
 - Added operator guides: troubleshooting, reverse proxy, PIA notes, environment reference, client stack patterns.
 - Added `CONTRIBUTING.md`, `SECURITY.md`, and root `LICENSE` (ISC).
 
+## [0.0.4.1] — 2026-04-20
+
+Patch release: packaging/docs polish and small monitoring improvements.
+
+### Added
+
+- `patches/README.md` documenting the `pia-wg-config` TLS fallback patch applied during image builds.
+
+### Changed
+
+- Port-forward monitoring now keys off `VPN_PORT_FORWARDING=on` as well as `PIA_PORT_FORWARDING`, so native Gluetun PF integrations work beyond PIA-only flows.
+- About page changelog line links to GitHub `CHANGELOG.md`.
+
+### Fixed
+
+- `/api/about` reads `CHANGELOG.md` from the runtime image path (`/usr/src/app/CHANGELOG.md`) so “latest release” is not empty in containers.
+
 ## [0.4.0] — 2026-04-20
 
 This release focuses on day-to-day usability: dashboard customization, better notifications, richer network/log tooling, and hardening the PIA automation path.

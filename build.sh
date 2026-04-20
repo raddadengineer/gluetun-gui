@@ -5,9 +5,9 @@ set -euo pipefail
 #
 # Usage:
 #   ./build.sh
-#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4 ./build.sh
-#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4 PUSH=1 ./build.sh
-#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 ./build.sh
+#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4.1 ./build.sh
+#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4.1 PUSH=1 ./build.sh
+#   IMG=raddadengineer/gluetun-gui TAG=v0.0.4.1 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 ./build.sh
 #
 # Env vars:
 #   IMG        Image repo/name (default: raddadengineer/gluetun-gui)
