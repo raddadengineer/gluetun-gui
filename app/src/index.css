@@ -1230,9 +1230,7 @@ input:checked+.slider:before {
 
 /* Notifications panel */
 .notif-panel {
-  position: absolute;
-  left: calc(100% + 12px);
-  bottom: 0;
+  position: fixed;
   width: 360px;
   max-height: min(520px, 70vh);
   overflow: auto;
@@ -1243,9 +1241,11 @@ input:checked+.slider:before {
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
-  z-index: 10050;
+  z-index: 20000;
   isolation: isolate;
 }
+
+/* When inline styles set position: fixed, we no-op here. */
 
 .sidebar-footer {
   margin-top: auto;

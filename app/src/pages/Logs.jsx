@@ -3,7 +3,7 @@ import { useNotifications } from '../contexts/NotificationsContext';
 
 export default function Logs() {
   const { notify } = useNotifications();
-  const [logs, setLogs] = useState([]);
+  const [logs, setLogs] = useState([]); // [{ raw, source, level, lower }]
   const [filter, setFilter] = useState('');
   const [wordWrap, setWordWrap] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
@@ -12,12 +12,36 @@ export default function Logs() {
   const [isPaused, setIsPaused] = useState(false);
   const [logStreamMode, setLogStreamMode] = useState('tail');
   const [logTail, setLogTail] = useState(100);
+  const [renderLimit, setRenderLimit] = useState(800);
+  const [sourceFilters, setSourceFilters] = useState({ VPN: true, GUI: true, SYS: true });
+  const [levelFilters, setLevelFilters] = useState({ error: true, warning: true, info: true, debug: true, other: true });
+  const [pausedCount, setPausedCount] = useState(0);
+  const [newWhileNotFollowing, setNewWhileNotFollowing] = useState(0);
   const isPausedRef = useRef(isPaused);
+  const pausedBufferRef = useRef([]);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
   const logAlertRef = useRef({ lastAt: 0, lastSnippet: '' });
 
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
+
+  const parseLogLine = useCallback((rawLine) => {
+    const raw = String(rawLine ?? '');
+    const lower = raw.toLowerCase();
+    let level = 'other';
+    if (/\b(fatal|panic|critical)\b/i.test(raw) || /\berror\b/i.test(raw)) level = 'error';
+    else if (/\bwarn(ing)?\b/i.test(raw)) level = 'warning';
+    else if (/\binfo\b/i.test(raw)) level = 'info';
+    else if (/\bdebug\b/i.test(raw)) level = 'debug';
+
+    // Parse multiplexer prefix
+    let source = 'SYS';
+    const m = raw.match(/^\[(.*?)\]\s(.*)/);
+    if (m) source = String(m[1] || 'SYS').trim() || 'SYS';
+    if (source !== 'VPN' && source !== 'GUI') source = 'SYS';
+
+    return { raw, source, level, lower };
+  }, []);
 
   const maybeNotifyLogAlert = useCallback((line) => {
     if (!line || typeof line !== 'string') return;
@@ -58,30 +82,55 @@ export default function Logs() {
     const eventSource = new EventSource(`/api/logs?${qs}`);
 
     eventSource.onmessage = (event) => {
-      if (isPausedRef.current) return;
       try {
-        let line = JSON.parse(event.data);
-        if (line && line.trim() !== '') {
-          maybeNotifyLogAlert(line);
-          setLogs((prev) => {
-            const newLogs = [...prev, line];
-            if (newLogs.length > 2000) return newLogs.slice(newLogs.length - 2000);
-            return newLogs;
-          });
+        const line = JSON.parse(event.data);
+        if (!line || String(line).trim() === '') return;
+        maybeNotifyLogAlert(line);
+        const row = parseLogLine(line);
+        if (isPausedRef.current) {
+          pausedBufferRef.current.push(row);
+          setPausedCount((c) => c + 1);
+          return;
         }
-      } catch (e) {
+        setLogs((prev) => {
+          const next = [...prev, row];
+          if (next.length > 5000) return next.slice(next.length - 5000);
+          return next;
+        });
+      } catch {
         // Fallback
       }
     };
 
     return () => eventSource.close();
-  }, [maybeNotifyLogAlert, logStreamMode, logTail]);
+  }, [maybeNotifyLogAlert, logStreamMode, logTail, parseLogLine]);
 
   useEffect(() => {
-    if (autoScroll && logsContainerRef.current) {
-      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    const el = logsContainerRef.current;
+    if (!el) return;
+    if (autoScroll) {
+      el.scrollTop = el.scrollHeight;
+      setNewWhileNotFollowing(0);
+      return;
     }
+    // If not auto-following, increment a counter when new logs arrive and user isn't at bottom.
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (!atBottom) setNewWhileNotFollowing((c) => c + 1);
   }, [logs, autoScroll]);
+
+  useEffect(() => {
+    if (isPaused) return;
+    if (pausedCount === 0) return;
+    // Flush buffer on resume (keep last 5000 overall)
+    const buf = pausedBufferRef.current;
+    pausedBufferRef.current = [];
+    setPausedCount(0);
+    setLogs((prev) => {
+      const next = [...prev, ...buf];
+      if (next.length > 5000) return next.slice(next.length - 5000);
+      return next;
+    });
+  }, [isPaused, pausedCount]);
 
   const toggleDebugging = async () => {
     setLoadingConfig(true);
@@ -111,13 +160,145 @@ export default function Logs() {
   };
 
   const filteredLogs = useMemo(() => {
-    if (!filter) return logs;
-    const lowerFilter = filter.toLowerCase();
-    return logs.filter(l => l.toLowerCase().includes(lowerFilter));
-  }, [logs, filter]);
+    const lowerFilter = filter.trim().toLowerCase();
+    const out = logs.filter((r) => {
+      if (!sourceFilters[r.source]) return false;
+      if (!levelFilters[r.level]) return false;
+      if (!lowerFilter) return true;
+      return r.lower.includes(lowerFilter);
+    });
+    return out;
+  }, [logs, filter, sourceFilters, levelFilters]);
+
+  const visibleLogs = useMemo(() => {
+    if (renderLimit <= 0) return filteredLogs;
+    if (filteredLogs.length <= renderLimit) return filteredLogs;
+    return filteredLogs.slice(filteredLogs.length - renderLimit);
+  }, [filteredLogs, renderLimit]);
+
+  function MultiSelectDropdown({ label, options, selected, onChange, minWidth = 160 }) {
+    const [open, setOpen] = useState(false);
+    const hostRef = useRef(null);
+
+    useEffect(() => {
+      if (!open) return;
+      const onDoc = (e) => {
+        const el = hostRef.current;
+        if (!el) return;
+        if (!el.contains(e.target)) setOpen(false);
+      };
+      document.addEventListener('mousedown', onDoc);
+      return () => document.removeEventListener('mousedown', onDoc);
+    }, [open]);
+
+    const selectedLabel = selected.length === 0 ? 'None' : selected.join(', ');
+
+    return (
+      <div ref={hostRef} style={{ position: 'relative', minWidth }}>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setOpen((o) => !o)}
+          style={{
+            width: '100%',
+            justifyContent: 'space-between',
+            padding: '8px 12px',
+            background: 'var(--glass-bg)',
+            border: '1px solid var(--glass-border)',
+            color: 'var(--text-secondary)',
+            fontSize: '13px',
+          }}
+          aria-expanded={open}
+        >
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+            <span style={{ fontWeight: 700, color: 'var(--text-secondary)' }}>{label}</span>
+            <span style={{ color: 'var(--text-primary)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {selectedLabel}
+            </span>
+          </span>
+          <span className="material-icons-round" style={{ fontSize: '18px', color: 'var(--text-secondary)' }}>
+            {open ? 'expand_less' : 'expand_more'}
+          </span>
+        </button>
+
+        {open && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 8px)',
+              left: 0,
+              right: 0,
+              zIndex: 200,
+              background: 'var(--bg-color)',
+              border: '1px solid var(--glass-border)',
+              borderRadius: '12px',
+              padding: '10px',
+              boxShadow: '0 12px 40px rgba(0, 0, 0, 0.6)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px',
+              maxHeight: '240px',
+              overflow: 'auto',
+            }}
+            className="custom-scrollbar"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {options.map((opt) => {
+              const checked = selected.includes(opt.value);
+              return (
+                <label
+                  key={opt.value}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    cursor: 'pointer',
+                    padding: '8px 10px',
+                    borderRadius: '10px',
+                    background: checked ? 'rgba(59,130,246,0.10)' : 'transparent',
+                    border: `1px solid ${checked ? 'rgba(59,130,246,0.22)' : 'transparent'}`,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                        ? [...selected, opt.value]
+                        : selected.filter((v) => v !== opt.value);
+                      onChange(next);
+                    }}
+                  />
+                  <span style={{ fontSize: '13px', color: 'var(--text-primary)', fontWeight: 600 }}>{opt.label}</span>
+                </label>
+              );
+            })}
+            <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => onChange(options.map((o) => o.value))}
+                style={{ padding: '8px 10px', fontSize: '12px', flex: 1, justifyContent: 'center' }}
+              >
+                Select all
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => onChange([])}
+                style={{ padding: '8px 10px', fontSize: '12px', flex: 1, justifyContent: 'center' }}
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 80px)', minHeight: 0, gap: '20px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, gap: '20px' }}>
       <header className="header" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div className="header-title">
           <h2>System Logs</h2>
@@ -159,6 +340,8 @@ export default function Logs() {
               value={logStreamMode}
               onChange={(e) => {
                 setLogs([]);
+                pausedBufferRef.current = [];
+                setPausedCount(0);
                 setLogStreamMode(e.target.value);
               }}
             >
@@ -174,6 +357,8 @@ export default function Logs() {
                 value={String(logTail)}
                 onChange={(e) => {
                   setLogs([]);
+                  pausedBufferRef.current = [];
+                  setPausedCount(0);
                   setLogTail(Number(e.target.value));
                 }}
               >
@@ -184,6 +369,20 @@ export default function Logs() {
             </label>
           )}
         </div>
+        <MultiSelectDropdown
+          label="Sources"
+          minWidth={200}
+          options={[
+            { value: 'VPN', label: 'VPN' },
+            { value: 'GUI', label: 'GUI' },
+            { value: 'SYS', label: 'SYS' },
+          ]}
+          selected={['VPN', 'GUI', 'SYS'].filter((k) => sourceFilters[k])}
+          onChange={(next) => {
+            const set = new Set(next);
+            setSourceFilters({ VPN: set.has('VPN'), GUI: set.has('GUI'), SYS: set.has('SYS') });
+          }}
+        />
         <div style={{ flex: 1, position: 'relative' }}>
           <span className="material-icons-round" style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-secondary)', fontSize: '20px' }}>search</span>
           <input 
@@ -199,6 +398,43 @@ export default function Logs() {
           />
         </div>
         
+        <MultiSelectDropdown
+          label="Level"
+          minWidth={240}
+          options={[
+            { value: 'error', label: 'Error' },
+            { value: 'warning', label: 'Warning' },
+            { value: 'info', label: 'Info' },
+            { value: 'debug', label: 'Debug' },
+            { value: 'other', label: 'Other' },
+          ]}
+          selected={['error', 'warning', 'info', 'debug', 'other'].filter((k) => levelFilters[k])}
+          onChange={(next) => {
+            const set = new Set(next);
+            setLevelFilters({
+              error: set.has('error'),
+              warning: set.has('warning'),
+              info: set.has('info'),
+              debug: set.has('debug'),
+              other: set.has('other'),
+            });
+          }}
+        />
+        
+        <label style={{ fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          Render
+          <select
+            className="select-input"
+            value={String(renderLimit)}
+            onChange={(e) => setRenderLimit(Number(e.target.value))}
+            title="Limit rendered rows for performance"
+          >
+            {[200, 500, 800, 1200, 2000].map((n) => (
+              <option key={n} value={n}>last {n}</option>
+            ))}
+          </select>
+        </label>
+        
         <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-secondary)', cursor: 'pointer', fontSize: '14px' }}>
             <input type="checkbox" checked={wordWrap} onChange={(e) => setWordWrap(e.target.checked)} />
@@ -208,8 +444,26 @@ export default function Logs() {
             <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} disabled={isPaused} />
             Auto-Scroll Bottom
           </label>
-          <button onClick={() => setIsPaused(!isPaused)} className="btn" style={{ background: isPaused ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)', color: isPaused ? 'var(--success)' : '#f59e0b', padding: '8px 16px', fontSize: '14px', border: `1px solid ${isPaused ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}` }}>
-            <span className="material-icons-round" style={{ fontSize: '18px' }}>{isPaused ? 'play_arrow' : 'pause'}</span> {isPaused ? 'Resume Stream' : 'Pause Stream'}
+          <button
+            type="button"
+            onClick={() => setIsPaused(!isPaused)}
+            className="btn"
+            style={{
+              background: isPaused ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+              color: isPaused ? 'var(--success)' : 'var(--warning)',
+              padding: '8px 16px',
+              fontSize: '14px',
+              border: `1px solid ${isPaused ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+            }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px' }}>{isPaused ? 'play_arrow' : 'pause'}</span>
+            {isPaused ? 'Resume' : 'Pause'}
+            {isPaused && pausedCount > 0 && (
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>({pausedCount} buffered)</span>
+            )}
           </button>
           <button onClick={() => setLogs([])} className="btn" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--danger)', padding: '8px 16px', fontSize: '14px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
             <span className="material-icons-round" style={{ fontSize: '18px' }}>delete_sweep</span> Clear
@@ -217,7 +471,8 @@ export default function Logs() {
           <button
             type="button"
             onClick={() => {
-              const lines = filteredLogs.length ? filteredLogs : logs;
+              const rows = filteredLogs.length ? filteredLogs : logs;
+              const lines = rows.map((r) => r.raw);
               const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
               const url = URL.createObjectURL(blob);
               const a = document.createElement('a');
@@ -237,7 +492,8 @@ export default function Logs() {
           <button
             type="button"
             onClick={async () => {
-              const text = (filteredLogs.length ? filteredLogs : logs).join('\n');
+              const rows = (filteredLogs.length ? filteredLogs : logs);
+              const text = rows.map((r) => r.raw).join('\n');
               try {
                 await navigator.clipboard.writeText(text);
                 notify({ level: 'success', title: 'Copied', message: 'Visible log lines copied to clipboard.', source: 'logs', dedupeKey: 'logs_copy' });
@@ -285,24 +541,40 @@ export default function Logs() {
           lineHeight: '1.6',
           color: 'var(--mono-text)'
         }}>
-          {filteredLogs.map((log, index) => {
-            let color = 'var(--mono-text)';
-            const text = log.toLowerCase();
-            if (text.includes('fatal') || text.includes('panic')) color = '#ff7b72'; 
-            else if (text.includes('error')) color = '#f85149';
-            else if (text.includes('warn')) color = '#d29922';
-            else if (text.includes('info')) color = '#58a6ff';
-            else if (text.includes('debug')) color = '#bc8cff';
+          {!autoScroll && newWhileNotFollowing > 0 && (
+            <div style={{ padding: '0 20px 10px 20px' }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setAutoScroll(true);
+                  const el = logsContainerRef.current;
+                  if (el) el.scrollTop = el.scrollHeight;
+                }}
+                style={{
+                  width: '100%',
+                  justifyContent: 'center',
+                  background: 'rgba(59,130,246,0.14)',
+                  border: '1px solid rgba(59,130,246,0.28)',
+                  color: 'var(--accent-primary)',
+                }}
+              >
+                Jump to bottom ({newWhileNotFollowing} new)
+              </button>
+            </div>
+          )}
 
-            // Parse multiplexer prefix
-            let prefixMatch = log.match(/^\[(.*?)\]\s(.*)/);
-            let source = 'SYS';
-            let message = log;
-            
-            if (prefixMatch) {
-              source = prefixMatch[1];
-              message = prefixMatch[2];
-            }
+          {visibleLogs.map((row, index) => {
+            let color = 'var(--mono-text)';
+            if (row.level === 'error') color = '#f85149';
+            else if (row.level === 'warning') color = '#d29922';
+            else if (row.level === 'info') color = '#58a6ff';
+            else if (row.level === 'debug') color = '#bc8cff';
+
+            const log = row.raw;
+            const prefixMatch = log.match(/^\[(.*?)\]\s(.*)/);
+            const source = row.source;
+            const message = prefixMatch ? prefixMatch[2] : log;
 
             return (
               <div key={index} className="log-row" style={{ 
@@ -327,7 +599,7 @@ export default function Logs() {
             );
           })}
           {logs.length === 0 && <div style={{ color: '#8b949e', fontStyle: 'italic', padding: '16px 20px' }}>Listening for log streams...</div>}
-          {logs.length > 0 && filteredLogs.length === 0 && <div style={{ color: '#8b949e', fontStyle: 'italic', padding: '16px 20px' }}>No logs match the current filter "{filter}".</div>}
+          {logs.length > 0 && filteredLogs.length === 0 && <div style={{ color: '#8b949e', fontStyle: 'italic', padding: '16px 20px' }}>No logs match the current filter “{filter}”.</div>}
           <div ref={bottomRef} style={{ height: '1px' }} />
         </div>
       </div>

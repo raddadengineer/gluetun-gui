@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import {
   AreaChart, Area, BarChart, Bar,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend
@@ -62,21 +62,68 @@ const IFACE_META = {
 };
 const ifaceMeta = (name) => IFACE_META[name] || { label: name, color: '#8b92a5', icon: 'cable', badge: name.toUpperCase() };
 
-const HISTORY_MAX = 90;
+const NETWORK_MONITOR_PREFS_KEY = 'gluetun_gui_network_monitor_prefs_v1';
+
+const DEFAULT_PREFS = {
+  refreshMs: 1500,
+  historyMax: 180,
+  defaultRange: 30,
+  showInterfaces: {
+    tun0: true,
+    eth0: true,
+  },
+};
+
+function safeParse(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function loadPrefs() {
+  const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(NETWORK_MONITOR_PREFS_KEY) : null;
+  const parsed = raw ? safeParse(raw) : null;
+  if (!parsed || typeof parsed !== 'object') return DEFAULT_PREFS;
+  return {
+    ...DEFAULT_PREFS,
+    ...parsed,
+    showInterfaces: { ...DEFAULT_PREFS.showInterfaces, ...(parsed.showInterfaces || {}) },
+  };
+}
+
+function savePrefs(prefs) {
+  if (typeof localStorage === 'undefined') return;
+  localStorage.setItem(NETWORK_MONITOR_PREFS_KEY, JSON.stringify(prefs));
+}
 
 export default function Network() {
   const [history, setHistory]         = useState([]);    // { time, tun0_dl, tun0_ul, eth0_dl, eth0_ul }
   const [liveIfaces, setLiveIfaces]   = useState({});    // current raw bytes per iface
   const [speeds, setSpeeds]           = useState({});    // bytes/s per iface { tun0: { rx, tx }, eth0: { rx, tx } }
   const [peaks, setPeaks]             = useState({});
-  const [timeRange, setTimeRange]     = useState(30);
+  const [prefs, setPrefs]             = useState(() => loadPrefs());
+  const [timeRange, setTimeRange]     = useState(() => loadPrefs().defaultRange || 30);
   const [activeTab, setActiveTab]     = useState('live'); // 'live' | 'sessions'
   const [sessions, setSessions]       = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [sessionPage, setSessionPage] = useState(0);
+  const [paused, setPaused]           = useState(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState(null);
   const SESSION_PAGE_SIZE = 8;
 
   const prevRef = useRef({});
+
+  useEffect(() => {
+    savePrefs(prefs);
+  }, [prefs]);
+
+  useEffect(() => {
+    const sync = () => setPrefs(loadPrefs());
+    window.addEventListener('gluetun-network-monitor-prefs', sync);
+    return () => window.removeEventListener('gluetun-network-monitor-prefs', sync);
+  }, []);
 
   // ─── Fetch live metrics ──────────────────────────────────────────────────────
   const fetchMetrics = useCallback(async () => {
@@ -114,15 +161,27 @@ export default function Network() {
         return updated;
       });
 
+      setPrefs((p) => {
+        const showInterfaces = { ...(p.showInterfaces || {}) };
+        Object.keys(nets).forEach((k) => {
+          if (!(k in showInterfaces)) showInterfaces[k] = true;
+        });
+        return { ...p, showInterfaces };
+      });
+
       const label = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const point = { time: label };
       Object.entries(newSpeeds).forEach(([name, s]) => {
         point[`${name}_dl`] = s.rx / 1024;
         point[`${name}_ul`] = s.tx / 1024;
       });
-      setHistory(h => [...h, point].slice(-HISTORY_MAX));
+      setHistory(h => [...h, point].slice(-(prefs.historyMax || DEFAULT_PREFS.historyMax)));
+      setLastUpdatedAt(new Date().toISOString());
     } catch (e) { console.error(e); }
-  }, []);
+  }, [prefs.historyMax]);
+
+  const resetPeaks = useCallback(() => setPeaks({}), []);
+  const clearLiveHistory = useCallback(() => setHistory([]), []);
 
   // ─── Fetch sessions ──────────────────────────────────────────────────────────
   const fetchSessions = useCallback(async () => {
@@ -190,17 +249,22 @@ export default function Network() {
   };
 
   useEffect(() => {
+    if (paused) return;
     fetchMetrics();
-    const iv = setInterval(fetchMetrics, 1500);
+    const iv = setInterval(fetchMetrics, Math.max(500, Number(prefs.refreshMs) || DEFAULT_PREFS.refreshMs));
     return () => clearInterval(iv);
-  }, [fetchMetrics]);
+  }, [fetchMetrics, paused, prefs.refreshMs]);
 
   useEffect(() => {
     if (activeTab === 'sessions') fetchSessions();
   }, [activeTab, fetchSessions]);
 
-  const display = history.slice(-timeRange);
   const ifaceNames = Object.keys(liveIfaces);
+  const visibleIfaces = useMemo(
+    () => ifaceNames.filter((n) => prefs.showInterfaces?.[n] !== false),
+    [ifaceNames, prefs.showInterfaces],
+  );
+  const display = history.slice(-timeRange);
 
   // ─── Calculate VPN vs LAN split chart data ───────────────────────────────────
   const splitData = display.map(d => ({
@@ -223,18 +287,101 @@ export default function Network() {
           <h2>Network Monitor</h2>
           <p>VPN tunnel vs LAN traffic · Per-session bandwidth history</p>
         </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setPaused((p) => !p)}
+            style={{
+              padding: '8px 14px',
+              fontSize: '13px',
+              background: paused ? 'rgba(245, 158, 11, 0.12)' : 'var(--glass-bg)',
+              border: `1px solid ${paused ? 'rgba(245, 158, 11, 0.35)' : 'var(--glass-border)'}`,
+              color: paused ? 'var(--warning)' : 'var(--text-secondary)',
+            }}
+            title={paused ? 'Resume auto-refresh' : 'Pause auto-refresh'}
+          >
+            <span className="material-icons-round" style={{ fontSize: '16px' }}>{paused ? 'play_arrow' : 'pause'}</span>
+            {paused ? 'Paused' : 'Live'}
+          </button>
+
+          <label className="btn" style={{ padding: 0, overflow: 'hidden', display: 'inline-flex' }}>
+            <span style={{ padding: '8px 10px', fontSize: '12px', color: 'var(--text-secondary)' }}>Refresh</span>
+            <select
+              value={prefs.refreshMs}
+              onChange={(e) => setPrefs((p) => ({ ...p, refreshMs: Number(e.target.value) }))}
+              style={{
+                background: 'transparent',
+                color: 'var(--text-primary)',
+                border: 'none',
+                padding: '8px 10px',
+                outline: 'none',
+                fontSize: '12px',
+                cursor: 'pointer',
+              }}
+              aria-label="Auto-refresh interval"
+            >
+              {[750, 1500, 3000, 5000].map((ms) => (
+                <option key={ms} value={ms}>{(ms / 1000).toFixed(ms === 1500 ? 1 : 2)}s</option>
+              ))}
+            </select>
+          </label>
+
           {[15, 30, 60, 90].map(r => (
             <button key={r} onClick={() => setTimeRange(r)} className="btn" style={{
-              padding: '8px 14px', fontSize: '13px',
+              padding: '8px 12px', fontSize: '13px',
               background: timeRange === r ? 'var(--accent-primary)' : 'var(--glass-bg)',
               color: timeRange === r ? '#fff' : 'var(--text-secondary)',
               border: `1px solid ${timeRange === r ? 'var(--accent-primary)' : 'var(--glass-border)'}`,
               boxShadow: timeRange === r ? '0 0 12px var(--accent-glow)' : 'none'
             }}>{r}s</button>
           ))}
+
+          <button type="button" className="btn" onClick={resetPeaks} style={{ padding: '8px 14px', fontSize: '13px' }} title="Reset peak values">
+            <span className="material-icons-round" style={{ fontSize: '16px' }}>restart_alt</span>
+            Reset peaks
+          </button>
+          <button type="button" className="btn" onClick={clearLiveHistory} style={{ padding: '8px 14px', fontSize: '13px' }} title="Clear chart history">
+            <span className="material-icons-round" style={{ fontSize: '16px' }}>delete_sweep</span>
+            Clear chart
+          </button>
         </div>
       </header>
+
+      {activeTab === 'live' && (
+        <div className="glass-panel" style={{ padding: '14px 18px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '16px', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <strong style={{ fontSize: '13px' }}>Interfaces</strong>
+              {ifaceNames.length === 0 ? (
+                <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Waiting for metrics…</span>
+              ) : visibleIfaces.length === 0 ? (
+                <span style={{ fontSize: '12px', color: 'var(--warning)' }}>All interfaces hidden</span>
+              ) : null}
+              {ifaceNames.map((name) => {
+                const meta = ifaceMeta(name);
+                const checked = prefs.showInterfaces?.[name] !== false;
+                return (
+                  <label key={name} style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => setPrefs((p) => ({ ...p, showInterfaces: { ...(p.showInterfaces || {}), [name]: e.target.checked } }))}
+                    />
+                    <span style={{ fontSize: '12px', color: checked ? 'var(--text-primary)' : 'var(--text-secondary)', display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="material-icons-round" style={{ fontSize: '16px', color: meta.color }}>{meta.icon}</span>
+                      {name}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+              {lastUpdatedAt ? <>Last update {formatDistanceToNow(new Date(lastUpdatedAt), { addSuffix: true })}</> : 'No updates yet'}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Tabs ── */}
       <div className="tabs-container" style={{ marginBottom: 0 }}>
@@ -251,7 +398,7 @@ export default function Network() {
         <>
           {/* ── Speed stat cards per interface ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px' }}>
-            {ifaceNames.map(name => {
+            {visibleIfaces.map(name => {
               const meta = ifaceMeta(name);
               const s = speeds[name] || { rx: 0, tx: 0 };
               const p = peaks[name]  || { rx: 0, tx: 0 };
@@ -305,11 +452,16 @@ export default function Network() {
                 </AreaChart>
               </ResponsiveContainer>
             </div>
+            {(!liveIfaces.tun0 && liveIfaces.eth0) && (
+              <div style={{ marginTop: '14px', fontSize: '12px', color: 'var(--warning)' }}>
+                No <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>tun0</code> interface detected. If the VPN isn’t connected yet, this is expected.
+              </div>
+            )}
           </div>
 
           {/* ── Per-interface breakdown ── */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '18px' }}>
-            {ifaceNames.map(name => {
+            {visibleIfaces.map(name => {
               const meta = ifaceMeta(name);
               const net  = liveIfaces[name] || { rx_bytes: 0, tx_bytes: 0 };
               const s    = speeds[name]     || { rx: 0, tx: 0 };
@@ -427,7 +579,7 @@ export default function Network() {
                               {sess.active ? '● ACTIVE' : 'ENDED'}
                             </span>
                             <span style={{ fontWeight: 600, fontSize: '15px' }}>{sess.provider}</span>
-                            <span style={{ fontSize: '12px', color: 'var(--text-secondary)', textTransform: 'uppercase', padding: '2px 8px', background: 'rgba(59,130,246,0.1)', borderRadius: '6px', color: 'var(--accent-primary)' }}>
+                            <span style={{ fontSize: '12px', color: 'var(--accent-primary)', textTransform: 'uppercase', padding: '2px 8px', background: 'rgba(59,130,246,0.1)', borderRadius: '6px' }}>
                               {sess.vpnType}
                             </span>
                           </div>

@@ -328,6 +328,37 @@ app.get('/api/metrics', authenticateToken, async (req, res) => {
         const container = docker.getContainer(gluetun.Id);
         const stats = await container.stats({ stream: false });
 
+        // Enrich network interfaces from inside the container.
+        // Docker's stats can omit tunnel devices (e.g. tun0) depending on engine/platform.
+        try {
+            const devExec = await container.exec({ Cmd: ['sh', '-c', 'cat /proc/net/dev 2>/dev/null || true'], AttachStdout: true, AttachStderr: true });
+            const devStream = await devExec.start();
+            const devText = await collectExecOutput(devStream, 3500);
+            const procIfaces = {};
+            // /proc/net/dev format:
+            // Inter-| Receive ... | Transmit ...
+            //  tun0: 123 0 0 0 0 0 0 0 456 0 0 0 0 0 0 0
+            for (const line of String(devText || '').split(/\r?\n/)) {
+                const m = line.match(/^\s*([^:]+):\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+/);
+                if (!m) continue;
+                const iface = m[1].trim();
+                if (!iface || iface === 'lo') continue;
+                const rx = Number(m[2]);
+                const tx = Number(m[10]);
+                if (!Number.isFinite(rx) || !Number.isFinite(tx)) continue;
+                procIfaces[iface] = { rx_bytes: rx, tx_bytes: tx };
+            }
+            if (stats && typeof stats === 'object') {
+                const merged = { ...(stats.networks || {}) };
+                Object.entries(procIfaces).forEach(([iface, v]) => {
+                    merged[iface] = { ...(merged[iface] || {}), ...v };
+                });
+                stats.networks = merged;
+            }
+        } catch {
+            // ignore enrichment errors; base docker stats will still work
+        }
+
         // Update session bandwidth accounting with per-interface data and IP checking
         await updateCurrentSession(stats.networks);
 

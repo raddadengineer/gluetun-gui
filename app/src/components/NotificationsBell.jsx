@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNotifications } from '../contexts/NotificationsContext';
 
 function levelIcon(level) {
@@ -22,15 +23,79 @@ function levelColor(level) {
 export default function NotificationsBell() {
   const { items, unreadCount, isOpen, setIsOpen, markAllRead, clearAll, markRead } = useNotifications();
   const ref = useRef(null);
+  const panelRef = useRef(null);
+  const [side, setSide] = useState('right'); // 'right' | 'left'
+  const [panelStyle, setPanelStyle] = useState(null);
 
   useEffect(() => {
     const onDoc = (e) => {
-      if (!ref.current) return;
-      if (!ref.current.contains(e.target)) setIsOpen(false);
+      const anchor = ref.current;
+      const panel = panelRef.current;
+      if (!anchor) return;
+      const t = e.target;
+      if (anchor.contains(t)) return;
+      if (panel && panel.contains(t)) return;
+      setIsOpen(false);
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
   }, [setIsOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const decide = () => {
+      const el = ref.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const panelW = 360;
+      const gap = 12;
+      const wouldOverflowRight = rect.right + gap + panelW > window.innerWidth - 8;
+      const wouldOverflowLeft = rect.left - gap - panelW < 8;
+      if (wouldOverflowRight && !wouldOverflowLeft) setSide('left');
+      else setSide('right');
+    };
+    decide();
+    window.addEventListener('resize', decide);
+    return () => window.removeEventListener('resize', decide);
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const place = () => {
+      const anchor = ref.current;
+      const panel = panelRef.current;
+      if (!anchor || !panel) return;
+      const rect = anchor.getBoundingClientRect();
+      const pRect = panel.getBoundingClientRect();
+      const gap = 12;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const w = Math.min(pRect.width || 360, vw - 16);
+      const h = Math.min(pRect.height || 320, vh - 16);
+
+      const leftWanted = rect.right + gap;
+      const rightWanted = vw - rect.left + gap;
+
+      const left = side === 'right' ? Math.min(leftWanted, vw - w - 8) : null;
+      const right = side === 'left' ? Math.min(rightWanted, vw - w - 8) : null;
+
+      const topWanted = rect.bottom - h;
+      const top = Math.max(8, Math.min(topWanted, vh - h - 8));
+
+      setPanelStyle({
+        position: 'fixed',
+        top,
+        left,
+        right,
+        width: w,
+        zIndex: 20000,
+      });
+    };
+    // Place after the panel has rendered/measured.
+    requestAnimationFrame(place);
+    window.addEventListener('resize', place);
+    return () => window.removeEventListener('resize', place);
+  }, [isOpen, side]);
 
   const latest = useMemo(() => [...items].reverse().slice(0, 20), [items]);
 
@@ -65,8 +130,12 @@ export default function NotificationsBell() {
         )}
       </button>
 
-      {isOpen && (
-        <div className="notif-panel custom-scrollbar">
+      {isOpen && createPortal(
+        <div
+          ref={panelRef}
+          className="notif-panel custom-scrollbar"
+          style={panelStyle || { position: 'fixed', right: 8, bottom: 8, zIndex: 20000 }}
+        >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
             <strong style={{ fontSize: '14px' }}>Notifications</strong>
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -109,7 +178,8 @@ export default function NotificationsBell() {
               </button>
             ))}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

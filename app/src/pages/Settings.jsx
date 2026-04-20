@@ -424,40 +424,7 @@ export default function Settings() {
     setFetchingFiltered(false);
   };
 
-  const renderPills = (list, fieldName) => {
-    if (!list || list.length === 0) return null;
-    return (
-      <div className="custom-scrollbar" style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px', maxHeight: '100px', overflowY: 'auto', padding: '6px', background: 'var(--surface-1)', borderRadius: '6px', border: '1px solid var(--glass-border)' }}>
-        {list.map(name => {
-          const isSelected = (config[fieldName] || '').split(',').map(s => s.trim()).includes(name);
-          return (
-            <span
-              key={name}
-              onClick={() => {
-                const current = config[fieldName] ? config[fieldName].split(',').map(s => s.trim()).filter(Boolean) : [];
-                if (!current.includes(name)) {
-                  handleChange({ target: { name: fieldName, value: [...current, name].join(', ') } });
-                } else {
-                  handleChange({ target: { name: fieldName, value: current.filter(n => n !== name).join(', ') } });
-                }
-              }}
-              style={{ 
-                fontSize: '11px', padding: '4px 8px', 
-                background: isSelected ? 'var(--accent-primary)' : 'var(--glass-bg)', 
-                border: isSelected ? '1px solid var(--accent-primary)' : '1px solid var(--glass-border)', 
-                borderRadius: '4px', cursor: 'pointer', transition: 'all 0.2s',
-                color: isSelected ? '#fff' : 'inherit'
-              }}
-              onMouseOver={e => { if (!isSelected) e.currentTarget.style.background = 'var(--surface-3)'; }}
-              onMouseOut={e => { if (!isSelected) e.currentTarget.style.background = 'var(--glass-bg)'; }}
-            >
-              {name}
-            </span>
-          );
-        })}
-      </div>
-    );
-  };
+  // (removed unused renderPills helper)
 
   // Linked pill renderer — uses handlePillClick for cascading filter propagation
   const renderLinkedPills = (list, fieldName) => {
@@ -1112,8 +1079,8 @@ export default function Settings() {
                                 {fetchingPiaWgRegions
                                   ? 'Loading regions from PIA…'
                                   : piaPortForwarding
-                                    ? 'No port-forwarding regions available yet. Click \"Refresh\".'
-                                    : 'Click \"Refresh\" to load regions from PIA...'}
+                                    ? 'No port-forwarding regions available yet. Click "Refresh".'
+                                    : 'Click "Refresh" to load regions from PIA...'}
                               </div>
                             )}
                           </div>
@@ -1346,7 +1313,7 @@ export default function Settings() {
                               <div style={{ color: 'var(--text-secondary)', fontSize: '13px', fontStyle: 'italic', width: '100%', textAlign: 'center', padding: '20px' }}>
                                 {fetchingPiaOpenVpnList
                                   ? 'Fetching server list from Gluetun (servers.json)…'
-                                  : 'No regions loaded yet. Click \"Fetch server list\" to load labels from Gluetun.'}
+                                  : 'No regions loaded yet. Click "Fetch server list" to load labels from Gluetun.'}
                               </div>
                             )}
                           </div>
@@ -2066,6 +2033,128 @@ export default function Settings() {
                   Applied immediately and saved in this browser (
                   <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
                 </p>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <div id="network-monitor" style={{ scrollMarginTop: '24px' }}>
+                <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>sensors</span>
+                  Network Monitor
+                </h3>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 14px 0', lineHeight: 1.5 }}>
+                  Controls the auto-refresh rate and chart history size on the <strong style={{ fontWeight: 600 }}>Network</strong> page. Stored in this browser only.
+                </p>
+
+                <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '16px' }}>
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Auto-refresh</label>
+                      <select
+                        className="text-input"
+                        value={(() => {
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : null;
+                            return parsed?.refreshMs ?? 1500;
+                          } catch {
+                            return 1500;
+                          }
+                        })()}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : {};
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ ...parsed, refreshMs: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          } catch {
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ refreshMs: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          }
+                        }}
+                      >
+                        <option value={750}>0.75s</option>
+                        <option value={1500}>1.5s</option>
+                        <option value={3000}>3s</option>
+                        <option value={5000}>5s</option>
+                      </select>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                        Lower values update charts more often but use more CPU.
+                      </p>
+                    </div>
+
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Chart history (points)</label>
+                      <input
+                        type="number"
+                        className="text-input"
+                        min={30}
+                        max={600}
+                        defaultValue={(() => {
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : null;
+                            return parsed?.historyMax ?? 180;
+                          } catch {
+                            return 180;
+                          }
+                        })()}
+                        onBlur={(e) => {
+                          const v = Math.max(30, Math.min(600, Number(e.target.value) || 180));
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : {};
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ ...parsed, historyMax: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          } catch {
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ historyMax: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          }
+                        }}
+                      />
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                        How many samples the live charts keep before dropping old points.
+                      </p>
+                    </div>
+
+                    <div className="form-group" style={{ margin: 0 }}>
+                      <label>Default range</label>
+                      <select
+                        className="text-input"
+                        defaultValue={(() => {
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : null;
+                            return parsed?.defaultRange ?? 30;
+                          } catch {
+                            return 30;
+                          }
+                        })()}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          try {
+                            const raw = localStorage.getItem('gluetun_gui_network_monitor_prefs_v1');
+                            const parsed = raw ? JSON.parse(raw) : {};
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ ...parsed, defaultRange: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          } catch {
+                            localStorage.setItem('gluetun_gui_network_monitor_prefs_v1', JSON.stringify({ defaultRange: v }));
+                            window.dispatchEvent(new CustomEvent('gluetun-network-monitor-prefs'));
+                          }
+                        }}
+                      >
+                        <option value={15}>15s</option>
+                        <option value={30}>30s</option>
+                        <option value={60}>60s</option>
+                        <option value={90}>90s</option>
+                      </select>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                        Initial time window when opening the page.
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
