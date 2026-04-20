@@ -1,6 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../contexts/NotificationsContext';
 import ThemePicker from '../components/ThemePicker';
+import {
+  appendDefaultLayoutItem,
+  buildLayoutFromTemplate,
+  DASHBOARD_WIDGET_CATALOG,
+  DEFAULT_WIDGET_ORDER,
+  DASHBOARD_WIDGET_STORAGE_KEY,
+  loadDashboardWidgetPrefs,
+  saveDashboardWidgetPrefs,
+} from '../dashboard/dashboardWidgets';
+import { DASHBOARD_WIDGETS_CHANGED } from '../hooks/useDashboardWidgets';
 
 function isGuiPiaProvider(v) {
   return String(v || '').trim().toLowerCase() === 'private internet access';
@@ -15,11 +26,16 @@ function isGuiWireGuardType(v) {
 }
 
 export default function Settings() {
+  const location = useLocation();
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
   const [config, setConfig] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [activeTab, setActiveTab] = useState('general');
+  const [dashPrefs, setDashPrefs] = useState(() => {
+    const p = loadDashboardWidgetPrefs();
+    return { hidden: [...p.hidden], layout: p.layout.map((x) => ({ ...x })) };
+  });
   const settingsFormRef = useRef(null);
   const [settingsSearch, setSettingsSearch] = useState('');
   const [saveDiffModal, setSaveDiffModal] = useState({
@@ -55,6 +71,68 @@ export default function Settings() {
   useEffect(() => {
     refreshHomelabBackups();
   }, [refreshHomelabBackups]);
+
+  useEffect(() => {
+    const st = location.state;
+    if (!st || (!st.settingsTab && !st.scrollTo)) return;
+    if (st.settingsTab) setActiveTab(st.settingsTab);
+    if (st.scrollTo) {
+      requestAnimationFrame(() => {
+        document.getElementById(st.scrollTo)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+  }, [location.state, location.key]);
+
+  useEffect(() => {
+    const sameDash = (a, b) => [...a.hidden].sort().join(',') === [...b.hidden].sort().join(',')
+      && JSON.stringify(a.layout) === JSON.stringify(b.layout);
+
+    const sync = () => {
+      const p = loadDashboardWidgetPrefs();
+      setDashPrefs((prev) => {
+        const next = { hidden: [...p.hidden], layout: p.layout.map((x) => ({ ...x })) };
+        if (sameDash(prev, next)) return prev;
+        return next;
+      });
+    };
+    window.addEventListener(DASHBOARD_WIDGETS_CHANGED, sync);
+    const onStorage = (e) => {
+      if (e.key === DASHBOARD_WIDGET_STORAGE_KEY) sync();
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      window.removeEventListener(DASHBOARD_WIDGETS_CHANGED, sync);
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const pushDashPrefs = useCallback((next) => {
+    saveDashboardWidgetPrefs(new Set(next.hidden), next.layout, false);
+    setDashPrefs({ hidden: [...next.hidden], layout: next.layout.map((x) => ({ ...x })) });
+    window.dispatchEvent(new CustomEvent(DASHBOARD_WIDGETS_CHANGED));
+  }, []);
+
+  const toggleDashWidget = useCallback((id) => {
+    setDashPrefs((prev) => {
+      const h = new Set(prev.hidden);
+      let layout = prev.layout.map((x) => ({ ...x }));
+      if (h.has(id)) {
+        h.delete(id);
+        layout = appendDefaultLayoutItem(layout, id);
+      } else {
+        h.add(id);
+        layout = layout.filter((l) => l.i !== id);
+      }
+      const hidden = [...h];
+      saveDashboardWidgetPrefs(h, layout);
+      window.dispatchEvent(new CustomEvent(DASHBOARD_WIDGETS_CHANGED));
+      return { hidden, layout };
+    });
+  }, []);
+
+  const resetDashWidgets = useCallback(() => {
+    pushDashPrefs({ hidden: [], layout: buildLayoutFromTemplate(DEFAULT_WIDGET_ORDER) });
+  }, [pushDashPrefs]);
 
   useEffect(() => {
     const root = settingsFormRef.current;
@@ -1988,6 +2066,60 @@ export default function Settings() {
                   Applied immediately and saved in this browser (
                   <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
                 </p>
+              </div>
+
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+
+              <div id="dashboard-widgets" style={{ scrollMarginTop: '24px' }}>
+                <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>dashboard_customize</span>
+                  Dashboard widgets
+                </h3>
+                <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 14px 0', lineHeight: 1.5 }}>
+                  Turn widgets on or off here. On <strong style={{ fontWeight: 600 }}>Overview</strong>, turn on <strong style={{ fontWeight: 600 }}>Edit layout</strong> to move and resize tiles; turn it off to lock and save. Preferences are stored in this browser (
+                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>localStorage</code> key{' '}
+                  <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>{DASHBOARD_WIDGET_STORAGE_KEY}</code>
+                  ).
+                </p>
+
+                <div className="glass-panel" style={{ padding: '0', borderRadius: '12px', border: '1px solid var(--glass-border)', overflow: 'hidden' }}>
+                  {DASHBOARD_WIDGET_CATALOG.map((meta, idx) => {
+                    const visible = !dashPrefs.hidden.includes(meta.id);
+                    return (
+                      <div
+                        key={meta.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'auto 1fr',
+                          gap: '12px',
+                          alignItems: 'center',
+                          padding: '12px 14px',
+                          borderBottom: idx < DASHBOARD_WIDGET_CATALOG.length - 1 ? '1px solid var(--glass-border)' : 'none',
+                        }}
+                      >
+                        <label style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={visible}
+                            onChange={() => toggleDashWidget(meta.id)}
+                            aria-label={`Show ${meta.label}`}
+                          />
+                        </label>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: '14px' }}>{meta.label}</div>
+                          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '2px', lineHeight: 1.4 }}>{meta.description}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div style={{ marginTop: '12px', display: 'flex', justifyContent: 'flex-end' }}>
+                  <button type="button" className="btn" onClick={resetDashWidgets}>
+                    <span className="material-icons-round" style={{ fontSize: '18px' }}>restart_alt</span>
+                    Reset layout
+                  </button>
+                </div>
               </div>
 
               <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />

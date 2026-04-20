@@ -4,6 +4,39 @@ import { useToast } from './ToastContext';
 const STORAGE_KEY = 'gluetun_gui_notifications_v1';
 const PREFS_KEY = 'gluetun_gui_notification_prefs_v1';
 
+/** Merge window for same `dedupeKey` (scan newest matching item, not only the list tail). */
+const NOTIFICATION_DEDUPE_WINDOW_MS = 120_000;
+
+function levelToToastType(level) {
+  if (level === 'success') return 'success';
+  if (level === 'error') return 'error';
+  if (level === 'warning') return 'warning';
+  return 'info';
+}
+
+/**
+ * @returns {{ next: typeof item[], didReplace: boolean }}
+ */
+function applyNotificationDedupe(prev, item, windowMs = NOTIFICATION_DEDUPE_WINDOW_MS) {
+  if (!item.dedupeKey) {
+    return { next: [...prev, item].slice(-200), didReplace: false };
+  }
+  const tNew = Date.parse(item.createdAt);
+  for (let i = prev.length - 1; i >= 0; i -= 1) {
+    const p = prev[i];
+    if (p.dedupeKey !== item.dedupeKey) continue;
+    const age = tNew - Date.parse(p.createdAt);
+    if (age >= 0 && age <= windowMs) {
+      return {
+        next: [...prev.slice(0, i), { ...item, id: p.id }].slice(-200),
+        didReplace: true,
+      };
+    }
+    break;
+  }
+  return { next: [...prev, item].slice(-200), didReplace: false };
+}
+
 const DEFAULT_PREFS = {
   enabled: true,
   sources: {
@@ -118,21 +151,19 @@ export function NotificationsProvider({ children }) {
     if (prefs.sources && src in prefs.sources && prefs.sources[src] === false) return;
     if (prefs.levels && item.level in prefs.levels && prefs.levels[item.level] === false) return;
 
+    let didReplace = false;
     setItems((prev) => {
-      // simple dedupe: if last item has same dedupeKey within 10s, replace it
-      if (item.dedupeKey && prev.length) {
-        const last = prev[prev.length - 1];
-        const dt = Date.parse(item.createdAt) - Date.parse(last.createdAt);
-        if (last?.dedupeKey === item.dedupeKey && dt >= 0 && dt < 10_000) {
-          return [...prev.slice(0, -1), { ...item, id: last.id }];
-        }
-      }
-      return [...prev, item].slice(-200);
+      const { next, didReplace: rep } = applyNotificationDedupe(prev, item);
+      didReplace = rep;
+      return next;
     });
 
-    // Optional toast for high-signal events (skipped during local quiet hours)
-    if (prefs.toasts?.[item.level] && !isLocalBrowserQuietHours(prefs.quietHours)) {
-      addToast(item.title, item.level === 'success' ? 'success' : (item.level === 'error' ? 'error' : 'success'));
+    // Toast only for new bell rows — updates to the same dedupeKey refresh the panel silently
+    const wantToast = prefs.toasts?.[item.level] && !isLocalBrowserQuietHours(prefs.quietHours);
+    if (wantToast && !didReplace) {
+      addToast(item.title, levelToToastType(item.level), {
+        dedupeKey: item.dedupeKey || `${item.source || 'app'}:${item.level}:${item.title}`,
+      });
     }
   }, [addToast, prefs]);
 
@@ -161,7 +192,7 @@ export function NotificationsProvider({ children }) {
     setIsOpen,
     prefs,
     setPrefs,
-  }), [items, unreadCount, notify, markRead, markAllRead, clearAll, isOpen, setPrefs]);
+  }), [items, unreadCount, notify, markRead, markAllRead, clearAll, isOpen, setIsOpen, prefs, setPrefs]);
 
   return (
     <NotificationsContext.Provider value={value}>

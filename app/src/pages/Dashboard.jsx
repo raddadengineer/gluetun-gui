@@ -1,20 +1,46 @@
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { formatDistanceToNow } from 'date-fns';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import ReactGridLayout, { WidthProvider } from 'react-grid-layout/legacy';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
 import { useNotifications } from '../contexts/NotificationsContext';
+import { useToast } from '../contexts/ToastContext';
+import { useDashboardWidgets } from '../hooks/useDashboardWidgets';
+import {
+  ConnectionStatusWidget,
+  ProtocolWidget,
+  ResourcesWidget,
+  NetworkThroughputWidget,
+  ThroughputChartWidget,
+  InternalNetworkWidget,
+  PiaMonitoringWidget,
+  ProxyPortsWidget,
+  DnsFirewallWidget,
+} from '../dashboard/DashboardPanels';
+
+const DashboardGridLayout = WidthProvider(ReactGridLayout);
 
 export default function Dashboard() {
   const navigate = useNavigate();
   const { notify } = useNotifications();
+  const addToast = useToast();
+  const {
+    layout,
+    setLayout,
+    visibleOrderedIds,
+    layoutEditMode,
+    setLayoutEditMode,
+    persistAndLockLayout,
+  } = useDashboardWidgets();
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [vpnTestBusy, setVpnTestBusy] = useState(false);
   const [piaMonitoring, setPiaMonitoring] = useState(null);
   const [metrics, setMetrics] = useState(null);
-  const [prevNet, setPrevNet] = useState({ rx: 0, tx: 0, time: Date.now() });
+  const netPrevRef = useRef({ rx: 0, tx: 0, time: Date.now() });
   const [netHistory, setNetHistory] = useState([]);
+  const piaMonitorNotifySig = useRef('');
 
   const formatBytes = (bytes, decimals = 1) => {
     if (!+bytes) return '0 B';
@@ -45,7 +71,7 @@ export default function Dashboard() {
       } else {
         setStatus({ error: true });
       }
-    } catch (err) {
+    } catch {
       setStatus({ error: true });
     } finally {
       setLoading(false);
@@ -83,36 +109,34 @@ export default function Dashboard() {
           tx_bytes = net.tx_bytes;
         }
 
-        setPrevNet(prev => {
-          const now = Date.now();
-          const timeDiff = (now - prev.time) / 1000;
-          let rxSpeed = 0;
-          let txSpeed = 0;
-          if (timeDiff > 0 && prev.rx > 0) {
-            rxSpeed = Math.max(0, (rx_bytes - prev.rx) / timeDiff);
-            txSpeed = Math.max(0, (tx_bytes - prev.tx) / timeDiff);
-          }
+        const prev = netPrevRef.current;
+        const now = Date.now();
+        const timeDiff = (now - prev.time) / 1000;
+        let rxSpeed = 0;
+        let txSpeed = 0;
+        if (timeDiff > 0 && prev.rx > 0) {
+          rxSpeed = Math.max(0, (rx_bytes - prev.rx) / timeDiff);
+          txSpeed = Math.max(0, (tx_bytes - prev.tx) / timeDiff);
+        }
+        netPrevRef.current = { rx: rx_bytes, tx: tx_bytes, time: now };
 
-          setMetrics({
-            cpu: cpuPercent.toFixed(1),
-            ramUsageBytes: ramUsage,
-            rxSpeed,
-            txSpeed,
-            totalRx: rx_bytes,
-            totalTx: tx_bytes
-          });
+        setMetrics({
+          cpu: cpuPercent.toFixed(1),
+          ramUsageBytes: ramUsage,
+          rxSpeed,
+          txSpeed,
+          totalRx: rx_bytes,
+          totalTx: tx_bytes,
+        });
 
-          setNetHistory(prevHist => {
-            const histItem = {
-              time: new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-              Incoming: rxSpeed / 1024, // KB
-              Outgoing: txSpeed / 1024, // KB
-            };
-            const newHist = [...prevHist, histItem];
-            return newHist.slice(Math.max(newHist.length - 15, 0));
-          });
-
-          return { rx: rx_bytes, tx: tx_bytes, time: now };
+        setNetHistory((prevHist) => {
+          const histItem = {
+            time: new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            Incoming: rxSpeed / 1024,
+            Outgoing: txSpeed / 1024,
+          };
+          const newHist = [...prevHist, histItem];
+          return newHist.slice(Math.max(newHist.length - 15, 0));
         });
       }
     } catch (err) {
@@ -134,9 +158,19 @@ export default function Dashboard() {
     }
   };
 
-  // Notifications from monitoring state (deduped)
+  // Notifications from monitoring — only when meaningful fields change (poll returns new object each time)
   useEffect(() => {
     if (!piaMonitoring) return;
+    const sig = [
+      piaMonitoring.failCount ?? '',
+      piaMonitoring.port ?? '',
+      piaMonitoring.lastForwardedPort ?? '',
+      piaMonitoring.publicIp ?? '',
+      piaMonitoring.portForwarding ? '1' : '0',
+    ].join('|');
+    if (sig === piaMonitorNotifySig.current) return;
+    piaMonitorNotifySig.current = sig;
+
     if (typeof piaMonitoring.failCount === 'number' && piaMonitoring.failCount > 0) {
       notify({
         level: 'warning',
@@ -172,7 +206,7 @@ export default function Dashboard() {
     };
   }, []);
 
-  const toggleSetting = async (key, currentValue) => {
+  const toggleSetting = useCallback(async (key, currentValue) => {
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -220,7 +254,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [notify]);
 
   const handleRestart = async () => {
     setLoading(true);
@@ -338,288 +372,187 @@ export default function Dashboard() {
 
   const isConnected = status && status.status === 'running';
 
+  const onGridLayoutChange = useCallback((newLayout) => {
+    setLayout(newLayout.map((it) => ({ ...it })));
+  }, [setLayout]);
+
+  const gridLayout = useMemo(() => {
+    const vis = new Set(visibleOrderedIds);
+    return layout.filter((l) => vis.has(l.i));
+  }, [layout, visibleOrderedIds]);
+
+  const renderWidget = useCallback((id) => {
+    switch (id) {
+      case 'connection':
+        return <ConnectionStatusWidget status={status} loading={loading} piaMonitoring={piaMonitoring} isConnected={isConnected} />;
+      case 'protocol':
+        return <ProtocolWidget status={status} />;
+      case 'resources':
+        return <ResourcesWidget metrics={metrics} formatBytes={formatBytes} />;
+      case 'network':
+        return <NetworkThroughputWidget metrics={metrics} formatBytes={formatBytes} />;
+      case 'throughputChart':
+        return <ThroughputChartWidget netHistory={netHistory} navigate={navigate} />;
+      case 'internalNetwork':
+        return <InternalNetworkWidget status={status} loading={loading} toggleSetting={toggleSetting} />;
+      case 'monitoring':
+        return <PiaMonitoringWidget piaMonitoring={piaMonitoring} />;
+      case 'proxyPorts':
+        return <ProxyPortsWidget status={status} />;
+      case 'dnsFirewall':
+        return <DnsFirewallWidget status={status} />;
+      default:
+        return null;
+    }
+  }, [status, loading, piaMonitoring, isConnected, metrics, netHistory, navigate, toggleSetting]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px' }}>
       <header className="header">
         <div className="header-title">
           <h2>Overview</h2>
           <p>Manage your VPN connections and proxy settings instantly</p>
+          <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '560px' }}>
+            {layoutEditMode ? (
+              <>
+                <strong style={{ fontWeight: 600 }}>Edit mode:</strong> drag the grip on each tile or resize from edges and corners. Turn off <strong style={{ fontWeight: 600 }}>Edit layout</strong> in <strong style={{ fontWeight: 600 }}>Quick Actions</strong> when done to lock and save.
+              </>
+            ) : (
+              <>
+                Layout is <strong style={{ fontWeight: 600 }}>locked</strong>. Open <strong style={{ fontWeight: 600 }}>Quick Actions</strong> to turn on <strong style={{ fontWeight: 600 }}>Edit layout</strong> or open <strong style={{ fontWeight: 600 }}>Widgets</strong> in Settings.
+              </>
+            )}
+          </p>
         </div>
-        <div style={{ position: 'relative' }}>
-          <button className="btn btn-primary" style={{ color: '#ffffff' }} onClick={() => setMenuOpen(!menuOpen)}>
-            <span className="material-icons-round">settings</span>
-            Quick Actions
-            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>arrow_drop_down</span>
-          </button>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+          <div style={{ position: 'relative' }}>
+            <button type="button" className="btn btn-primary" style={{ color: '#ffffff' }} onClick={() => setMenuOpen(!menuOpen)}>
+              <span className="material-icons-round">settings</span>
+              Quick Actions
+              <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>arrow_drop_down</span>
+            </button>
 
-          {menuOpen && (
-            <div className="dropdown-menu">
-              <button className="dropdown-item" onClick={() => { setMenuOpen(false); handleRestart(); }} disabled={loading}>
-                <span className="material-icons-round" style={{ fontSize: '18px' }}>autorenew</span>
-                {loading ? "Waiting..." : "Restart Engine"}
-              </button>
-              <button className="dropdown-item" onClick={() => { handleConnectivityTest(); }} disabled={loading || vpnTestBusy}>
-                <span className="material-icons-round" style={{ fontSize: '18px' }}>network_ping</span>
-                {vpnTestBusy ? 'Testing…' : 'Test VPN connectivity'}
-              </button>
-              <button className="dropdown-item" onClick={() => { setMenuOpen(false); handleTestFailover(); }} disabled={loading}>
-                <span className="material-icons-round" style={{ fontSize: '18px' }}>rotate_right</span>
-                {loading ? "Waiting..." : "Test Auto-Failover"}
-              </button>
-              <button className="dropdown-item danger" onClick={() => { setMenuOpen(false); handleStop(); }} disabled={loading}>
-                <span className="material-icons-round" style={{ fontSize: '18px' }}>power_settings_new</span>
-                {loading ? "Waiting..." : "Kill VPN"}
-              </button>
-            </div>
-          )}
+            {menuOpen && (
+              <div className="dropdown-menu">
+                <div
+                  className="dropdown-menu-section"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div
+                    className="toggle-switch-container"
+                    style={{
+                      padding: '8px 0',
+                      margin: 0,
+                      background: 'transparent',
+                      gap: '12px',
+                    }}
+                  >
+                    <div className="toggle-info" style={{ minWidth: 0 }}>
+                      <strong style={{ fontSize: '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span className="material-icons-round" style={{ fontSize: '18px', color: 'var(--accent-primary)' }}>
+                          {layoutEditMode ? 'edit' : 'lock'}
+                        </span>
+                        Edit layout
+                      </strong>
+                      <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                        {layoutEditMode ? 'Unlocked — save when you lock' : 'Locked — layout saved in this browser'}
+                      </span>
+                    </div>
+                    <label className="switch">
+                      <input
+                        type="checkbox"
+                        checked={layoutEditMode}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setLayoutEditMode(true);
+                          } else {
+                            persistAndLockLayout();
+                            addToast('Layout saved and locked', 'success', { dedupeKey: 'dashboard-layout-locked' });
+                          }
+                        }}
+                        aria-label={layoutEditMode ? 'Lock dashboard layout' : 'Unlock dashboard layout'}
+                      />
+                      <span className="slider" />
+                    </label>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="dropdown-item"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    navigate('/settings', { state: { settingsTab: 'application', scrollTo: 'dashboard-widgets' } });
+                  }}
+                >
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>tune</span>
+                  Widgets
+                </button>
+                <div className="dropdown-menu-divider" role="separator" />
+                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleRestart(); }} disabled={loading}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>autorenew</span>
+                  {loading ? 'Waiting...' : 'Restart Engine'}
+                </button>
+                <button type="button" className="dropdown-item" onClick={() => { handleConnectivityTest(); }} disabled={loading || vpnTestBusy}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>network_ping</span>
+                  {vpnTestBusy ? 'Testing…' : 'Test VPN connectivity'}
+                </button>
+                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleTestFailover(); }} disabled={loading}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>rotate_right</span>
+                  {loading ? 'Waiting...' : 'Test Auto-Failover'}
+                </button>
+                <button type="button" className="dropdown-item danger" onClick={() => { setMenuOpen(false); handleStop(); }} disabled={loading}>
+                  <span className="material-icons-round" style={{ fontSize: '18px' }}>power_settings_new</span>
+                  {loading ? 'Waiting...' : 'Kill VPN'}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
-      <div className="dashboard-grid">
-        <div className={`glass-panel status-card ${isConnected ? 'connected' : 'error'}`}>
-          <div className="status-header">
-            <div className="status-icon-wrapper">
-              <span className="material-icons-round">{isConnected ? 'public' : 'warning'}</span>
-            </div>
-            <span className={`status-badge ${isConnected ? 'online' : 'offline'}`}>
-              {isConnected ? 'PROTECTED' : 'OFFLINE'}
-            </span>
-          </div>
-
-          <div className="status-info">
-            <h3>{status?.displayProvider || status?.gui?.VPN_SERVICE_PROVIDER || status?.parsedEnv?.VPN_SERVICE_PROVIDER || (loading ? 'Loading…' : 'Unknown')}</h3>
-            {status?.currentSession?.publicIp ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', margin: '6px 0 8px 0' }}>
-                <span style={{ fontSize: '14px', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 500 }}>
-                  <span className="material-icons-round" style={{ fontSize: '16px' }}>my_location</span>
-                  {status.currentSession.publicIp} • {status.currentSession.location}
-                </span>
-                <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                  <span className="material-icons-round" style={{ fontSize: '14px' }}>dns</span>
-                  Active Node: {status.currentSession.serverIp || 'Resolving...'}
-                </span>
-              </div>
-            ) : isConnected && (
-              <div style={{ margin: '6px 0 8px 0', fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <span className="material-icons-round" style={{ fontSize: '14px', animation: 'spin 1s linear infinite' }}>refresh</span> 
-                Acquiring Connection Details...
-              </div>
-            )}
-            <p style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--text-secondary)' }}>
-              <span className="material-icons-round" style={{ fontSize: '14px' }}>schedule</span>
-              {status?.startedAt ? `Connected ${formatDistanceToNow(new Date(status.startedAt))} ago` : 'Uptime Unknown'}
-            </p>
-
-            {status?.image && (
-              <p style={{ fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px', color: 'var(--text-secondary)', marginTop: '8px', lineHeight: 1.4 }}>
-                <span className="material-icons-round" style={{ fontSize: '14px', flexShrink: 0 }}>layers</span>
-                <span>
-                  <span style={{ display: 'block', wordBreak: 'break-all' }}>{status.image}</span>
-                  {status.imageId && (
-                    <span style={{ fontSize: '10px', opacity: 0.85 }}>
-                      {String(status.imageId).length > 22 ? `${String(status.imageId).slice(0, 22)}…` : status.imageId}
-                    </span>
-                  )}
-                  {status.containerName && (
-                    <span style={{ fontSize: '10px', display: 'block', opacity: 0.85 }}>Container: {status.containerName}</span>
-                  )}
-                  {status.imageUpdate?.updateAvailable && (
-                    <span style={{ fontSize: '11px', display: 'block', marginTop: '6px', color: 'var(--warning)', fontWeight: 600 }}>
-                      Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
-                    </span>
-                  )}
-                  {status.imageUpdate?.checkError && !status.imageUpdate?.updateAvailable && (
-                    <span style={{ fontSize: '10px', display: 'block', marginTop: '4px', opacity: 0.75 }}>
-                      Image update check: {status.imageUpdate.checkError}
-                    </span>
-                  )}
-                </span>
-              </p>
-            )}
-
-            {status?.lastVpnConnectivityCheck?.at && (
-              <div style={{
-                marginTop: '10px',
-                padding: '10px 12px',
-                borderRadius: '8px',
-                border: `1px solid ${status.lastVpnConnectivityCheck.ok ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.35)'}`,
-                background: status.lastVpnConnectivityCheck.ok ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)',
-                fontSize: '12px',
-                lineHeight: 1.5,
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: status.lastVpnConnectivityCheck.ok ? 'var(--success)' : 'var(--danger)', marginBottom: '4px' }}>
-                  <span className="material-icons-round" style={{ fontSize: '16px' }}>network_ping</span>
-                  Last VPN check ({formatDistanceToNow(new Date(status.lastVpnConnectivityCheck.at), { addSuffix: true })})
-                </div>
-                <div style={{ color: 'var(--text-secondary)' }}>
-                  {status.lastVpnConnectivityCheck.ok ? (
-                    <>
-                      OK — public IP {status.lastVpnConnectivityCheck.publicIp || '—'} via {status.lastVpnConnectivityCheck.method || 'probe'}
-                    </>
-                  ) : (
-                    <>
-                      Failed — {status.lastVpnConnectivityCheck.error || status.lastVpnConnectivityCheck.detail || 'Unknown'}
-                    </>
-                  )}
-                </div>
-                {status.lastVpnConnectivityCheck.ok === false && Date.now() - new Date(status.lastVpnConnectivityCheck.at).getTime() > 24 * 60 * 60 * 1000 && (
-                  <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--warning)' }}>
-                    Result is older than 24h — run <strong style={{ fontWeight: 600 }}>Test VPN connectivity</strong> again after changes.
+      {visibleOrderedIds.length === 0 ? (
+        <div className="glass-panel" style={{ padding: '32px', textAlign: 'center' }}>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>All dashboard widgets are hidden.</p>
+          <Link to="/settings" state={{ settingsTab: 'application', scrollTo: 'dashboard-widgets' }} className="btn btn-primary" style={{ textDecoration: 'none', display: 'inline-flex' }}>
+            Configure in Settings
+          </Link>
+        </div>
+      ) : (
+        <DashboardGridLayout
+          className={`dashboard-rgl${layoutEditMode ? '' : ' dashboard-rgl--locked'}`}
+          layout={gridLayout}
+          cols={12}
+          rowHeight={22}
+          margin={[12, 12]}
+          containerPadding={[0, 0]}
+          onLayoutChange={layoutEditMode ? onGridLayoutChange : () => {}}
+          draggableHandle=".dashboard-widget-drag"
+          compactType="vertical"
+          preventCollision={false}
+          isDraggable={layoutEditMode}
+          isResizable={layoutEditMode}
+          resizeHandles={['se', 'sw', 'ne', 'nw', 's', 'n', 'e', 'w']}
+        >
+          {visibleOrderedIds.map((id) => (
+            <div key={id}>
+              <div className="dashboard-widget-shell">
+                {layoutEditMode && (
+                  <div className="dashboard-widget-chrome">
+                    <button type="button" className="dashboard-widget-drag" aria-label={`Move ${id} widget`}>
+                      <span className="material-icons-round">drag_indicator</span>
+                    </button>
+                    <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Move · resize</span>
                   </div>
                 )}
+                <div className={`dashboard-widget-body${layoutEditMode ? '' : ' dashboard-widget-body--full'}`}>
+                  {renderWidget(id)}
+                </div>
               </div>
-            )}
-
-            {piaMonitoring?.portForwarding && (
-              <p style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                <span className="material-icons-round" style={{ fontSize: '14px', color: 'var(--success)' }}>hub</span>
-                Port Forwarding: <strong style={{ color: 'var(--success)' }}>{piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'}</strong>
-              </p>
-            )}
-          </div>
-        </div>
-
-        <div className="glass-panel status-card">
-          <div className="status-header">
-            <div className="status-icon-wrapper" style={{ borderColor: 'rgba(255,255,255,0.2)' }}>
-              <span className="material-icons-round">swap_vert</span>
             </div>
-            <span className="status-badge" style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)' }}>PROTOCOL</span>
-          </div>
-          <div className="status-info">
-            {(() => {
-              const running = (status?.parsedEnv?.VPN_TYPE || '').toUpperCase() || 'UNKNOWN';
-              const configured = (status?.gui?.VPN_TYPE || '').toUpperCase() || null;
-              const show = configured || running || 'UNKNOWN';
-              const mismatch = configured && running && configured !== running;
-              return (
-                <>
-                  <h3 style={{ fontSize: '24px' }}>{show}</h3>
-                  {mismatch && (
-                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                      Running: <strong style={{ color: 'var(--text-primary)' }}>{running}</strong>
-                    </p>
-                  )}
-                </>
-              );
-            })()}
-            <p>
-              <span className="material-icons-round" style={{ fontSize: '16px' }}>speed</span>
-              Optimal MTU Settings Enforced
-            </p>
-          </div>
-        </div>
-
-        <div className="glass-panel status-card">
-          <div className="status-header">
-            <div className="status-icon-wrapper" style={{ borderColor: 'rgba(255,255,255,0.2)' }}>
-              <span className="material-icons-round">memory</span>
-            </div>
-            <span className="status-badge" style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)' }}>RESOURCES</span>
-          </div>
-          <div className="status-info">
-            <h3 style={{ fontSize: '24px' }}>{metrics?.cpu || '0.0'}% CPU</h3>
-            <p>
-              <span className="material-icons-round" style={{ fontSize: '16px', position: 'relative', top: '3px', marginRight: '4px' }}>storage</span>
-              {metrics ? formatBytes(metrics.ramUsageBytes) : '0 MB'} RAM
-            </p>
-          </div>
-        </div>
-
-        <div className="glass-panel status-card">
-          <div className="status-header">
-            <div className="status-icon-wrapper" style={{ borderColor: 'rgba(255,255,255,0.2)' }}>
-              <span className="material-icons-round">swap_calls</span>
-            </div>
-            <span className="status-badge" style={{ background: 'var(--glass-bg)', color: 'var(--text-secondary)' }}>NETWORK</span>
-          </div>
-          <div className="status-info">
-            <h3 style={{ fontSize: '24px' }}>&#8595; {metrics ? formatBytes(metrics.rxSpeed) : '0 B'}/s</h3>
-            <p style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>&#8593; {metrics ? formatBytes(metrics.txSpeed) : '0 B'}/s</span> &bull; {metrics ? formatBytes(metrics.totalRx, 0) : '0 B'} Total
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <div className="dashboard-grid glass-panel" style={{ marginTop: '24px', padding: '24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-          <h3><span className="material-icons-round">insights</span> Network Throughput (KB/s)</h3>
-          <button
-            className="btn"
-            onClick={() => navigate('/network')}
-            style={{ padding: '8px 16px', fontSize: '13px', background: 'rgba(59,130,246,0.1)', color: 'var(--accent-primary)', border: '1px solid rgba(59,130,246,0.2)' }}
-          >
-            <span className="material-icons-round" style={{ fontSize: '16px' }}>open_in_full</span>
-            Full Analysis
-          </button>
-        </div>
-        <div style={{ height: '250px', width: '100%' }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={netHistory} margin={{ top: 5, right: 10, left: 10, bottom: 5 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-              <XAxis dataKey="time" stroke="rgba(255,255,255,0.4)" fontSize={12} />
-              <YAxis stroke="rgba(255,255,255,0.4)" fontSize={12} />
-              <Tooltip 
-                contentStyle={{ background: 'rgba(0,0,0,0.8)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }} 
-              />
-              <Line type="monotone" dataKey="Incoming" stroke="#3b82f6" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line type="monotone" dataKey="Outgoing" stroke="#f59e0b" strokeWidth={2} dot={false} isAnimationActive={false} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div className="dashboard-grid" style={{ marginTop: '24px' }}>
-        <div className="glass-panel control-section">
-          <h3><span className="material-icons-round">router</span> Internal Network</h3>
-          <div className="toggle-switch-container">
-            <div className="toggle-info">
-              <strong>Shadowsocks Proxy</strong>
-              <span>Port 8388 • SOCKS5</span>
-            </div>
-            <label className="switch">
-              <input 
-                type="checkbox" 
-                checked={status?.parsedEnv?.SHADOWSOCKS === 'on'} 
-                onChange={() => toggleSetting('SHADOWSOCKS', status?.parsedEnv?.SHADOWSOCKS || 'off')} 
-                disabled={loading} 
-              />
-              <span className="slider"></span>
-            </label>
-          </div>
-          <div className="toggle-switch-container">
-            <div className="toggle-info">
-              <strong>HTTP Proxy</strong>
-              <span>Port 8888 • HTTP Tunnelling</span>
-            </div>
-            <label className="switch">
-              <input 
-                type="checkbox" 
-                checked={status?.parsedEnv?.HTTPPROXY === 'on'} 
-                onChange={() => toggleSetting('HTTPPROXY', status?.parsedEnv?.HTTPPROXY || 'off')} 
-                disabled={loading} 
-              />
-              <span className="slider"></span>
-            </label>
-          </div>
-          <div className="toggle-switch-container">
-            <div className="toggle-info">
-              <strong>Adblock Guard</strong>
-              <span>DNS Blocklists Enabled</span>
-            </div>
-            <label className="switch">
-              <input 
-                type="checkbox" 
-                checked={status?.parsedEnv?.BLOCK_ADS === 'on'} 
-                onChange={() => toggleSetting('BLOCK_ADS', status?.parsedEnv?.BLOCK_ADS || 'off')} 
-                disabled={loading} 
-              />
-              <span className="slider"></span>
-            </label>
-          </div>
-        </div>
-      </div>
+          ))}
+        </DashboardGridLayout>
+      )}
     </div>
   );
 }

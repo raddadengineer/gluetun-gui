@@ -155,6 +155,7 @@ export default function Sidebar() {
         </div>
 
         <nav className="nav-menu" aria-label="Main navigation">
+          <p className="nav-section-label">Overview</p>
           <NavLink to="/" end className={navClass} onClick={afterNavClick}>
             <span className="material-icons-round">dashboard</span>
             Dashboard
@@ -163,6 +164,7 @@ export default function Sidebar() {
             <span className="material-icons-round">terminal</span>
             Logs
           </NavLink>
+          <p className="nav-section-label">Tools</p>
           <NavLink to="/network" className={navClass} onClick={afterNavClick}>
             <span className="material-icons-round">network_check</span>
             Network
@@ -186,7 +188,7 @@ export default function Sidebar() {
           </div>
         )}
 
-        <div style={{ marginTop: 'auto', padding: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div className="sidebar-footer" style={{ padding: '0 24px 24px' }}>
           <NotificationsBell />
           <button
             type="button"

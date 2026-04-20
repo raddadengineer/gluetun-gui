@@ -33,7 +33,7 @@ const ProtectedRoute = ({ children }) => {
 
 const Layout = () => (
   <ProtectedRoute>
-    <div className="layout" style={{ display: 'flex', width: '100vw', minHeight: '100vh' }}>
+    <div className="layout" style={{ display: 'flex', alignItems: 'stretch', width: '100%', minHeight: '100vh' }}>
       <Sidebar />
       <main className="main-content">
         <Outlet />

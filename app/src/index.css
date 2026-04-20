@@ -10,6 +10,8 @@
   --accent-glow: rgba(59, 130, 246, 0.3);
   --success: #10b981;
   --success-glow: rgba(16, 185, 129, 0.2);
+  --warning: #f59e0b;
+  --warning-glow: rgba(245, 158, 11, 0.22);
   --danger: #ef4444;
   --danger-glow: rgba(239, 68, 68, 0.2);
   --text-grad-1: #fff;
@@ -38,6 +40,8 @@
   --accent-glow: rgba(14, 165, 233, 0.2);
   --success: #059669;
   --success-glow: rgba(5, 150, 105, 0.18);
+  --warning: #d97706;
+  --warning-glow: rgba(217, 119, 6, 0.18);
   --danger: #dc2626;
   --danger-glow: rgba(220, 38, 38, 0.18);
   --text-grad-1: #020617;
@@ -326,6 +330,7 @@ body {
 
 #root {
   display: flex;
+  align-items: stretch;
   min-height: 100vh;
 }
 
@@ -349,10 +354,16 @@ body {
 .sidebar-host {
   flex-shrink: 0;
   position: relative;
+  z-index: 20;
+  display: flex;
+  align-self: stretch;
+  min-height: 100vh;
 }
 
 .sidebar {
+  flex: 1;
   width: 280px;
+  min-height: 100%;
   padding: 32px 24px;
   border-right: 1px solid var(--glass-border);
   display: flex;
@@ -504,10 +515,25 @@ body {
 .nav-menu {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+}
+
+.nav-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  padding: 18px 16px 6px;
+  margin: 0;
+}
+
+.nav-section-label:first-child {
+  padding-top: 4px;
 }
 
 .nav-item {
@@ -530,19 +556,36 @@ body {
 }
 
 .nav-item.active {
-  background: rgba(59, 130, 246, 0.1);
+  position: relative;
+  background: rgba(59, 130, 246, 0.12);
   color: var(--accent-primary);
-  border-color: rgba(59, 130, 246, 0.2);
-  box-shadow: 0 0 16px var(--accent-glow);
+  border-color: rgba(59, 130, 246, 0.28);
+  box-shadow: 0 0 20px var(--accent-glow);
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 56%;
+  border-radius: 0 4px 4px 0;
+  background: linear-gradient(180deg, var(--accent-primary), rgba(59, 130, 246, 0.45));
 }
 
 .main-content {
   flex: 1;
+  min-width: 0;
   padding: 40px;
   display: flex;
   flex-direction: column;
   gap: 32px;
-  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-y: visible;
+  position: relative;
+  z-index: 1;
 }
 
 .header {
@@ -567,6 +610,110 @@ body {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 24px;
+}
+
+/* react-grid-layout (dashboard) */
+.dashboard-rgl {
+  min-height: 120px;
+}
+
+.dashboard-rgl .react-grid-layout {
+  position: relative;
+}
+
+.dashboard-rgl .react-grid-item {
+  transition: transform 120ms ease, width 120ms ease, height 120ms ease;
+}
+
+.dashboard-rgl .react-grid-item.cssTransforms {
+  transition-property: transform, width, height;
+}
+
+.dashboard-rgl .react-grid-item > .react-resizable-handle {
+  opacity: 0.35;
+  transition: opacity 0.15s ease;
+}
+
+.dashboard-rgl .react-grid-item:hover > .react-resizable-handle {
+  opacity: 1;
+}
+
+.dashboard-rgl .react-grid-placeholder {
+  background: rgba(59, 130, 246, 0.12);
+  border-radius: 14px;
+  border: 2px dashed rgba(59, 130, 246, 0.35);
+}
+
+.dashboard-rgl--locked .react-resizable-handle {
+  display: none !important;
+}
+
+.dashboard-widget-body--full {
+  border-radius: 14px;
+}
+
+.dashboard-widget-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-radius: 14px;
+  border: 1px solid var(--glass-border);
+  background: rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+}
+
+.dashboard-widget-chrome {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--surface-2);
+}
+
+.dashboard-widget-drag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  margin: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: grab;
+  font: inherit;
+}
+
+.dashboard-widget-drag:active {
+  cursor: grabbing;
+}
+
+.dashboard-widget-drag .material-icons-round {
+  font-size: 18px;
+}
+
+.dashboard-widget-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+}
+
+.dashboard-widget-body .glass-panel,
+.dashboard-widget-body .control-section {
+  height: 100%;
+  min-height: 100%;
+  border-radius: 0;
+  border: none;
+  box-shadow: none;
+}
+
+.dashboard-widget-body .glass-panel:hover,
+.dashboard-widget-body .control-section:hover {
+  transform: none;
 }
 
 /* Status Card styling */
@@ -972,12 +1119,26 @@ input:checked+.slider:before {
   border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 8px;
-  min-width: 200px;
+  min-width: 280px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
   z-index: 100;
+}
+
+.dropdown-menu-section {
+  padding: 4px 8px 10px;
+  border-bottom: 1px solid var(--glass-border);
+  margin-bottom: 4px;
+}
+
+.dropdown-menu-divider {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--glass-border);
+  border: none;
+  flex-shrink: 0;
 }
 
 .dropdown-item {
@@ -1051,13 +1212,29 @@ input:checked+.slider:before {
   color: var(--danger);
 }
 
+.toast-warning {
+  border-left: 4px solid #f59e0b;
+}
+
+.toast-warning .material-icons-round {
+  color: #f59e0b;
+}
+
+.toast-info {
+  border-left: 4px solid var(--accent-primary);
+}
+
+.toast-info .material-icons-round {
+  color: var(--accent-primary);
+}
+
 /* Notifications panel */
 .notif-panel {
   position: absolute;
   left: calc(100% + 12px);
   bottom: 0;
   width: 360px;
-  max-height: 520px;
+  max-height: min(520px, 70vh);
   overflow: auto;
   padding: 14px;
   border-radius: 14px;
@@ -1066,7 +1243,17 @@ input:checked+.slider:before {
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
-  z-index: 9998;
+  z-index: 10050;
+  isolation: isolate;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--glass-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .notif-item {
