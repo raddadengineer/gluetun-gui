@@ -15,3 +15,17 @@ The GUI server runs a **background monitor** (`checkVPN`) against the **Gluetun 
 Webhooks are **throttled per event type** (and `gluetun_container_missing` is limited to once per 5 minutes) to avoid storms during flapping.
 
 Webhook URLs and quiet hours are configured in the UI under **Settings → This app**; see [OPERATIONS.md](OPERATIONS.md) for environment variable names. PIA-specific UI fields: **[PIA.md](PIA.md)**.
+
+## Port forwarding failures (PIA)
+
+When port forwarding is enabled, Gluetun may log startup errors like:
+
+- `starting port forwarding service: ... getSignature ... context deadline exceeded`
+
+This means Gluetun timed out calling PIA’s port-forward gateway through the tunnel. Common causes:
+
+- The selected region/server is not PF-capable
+- A startup race (tunnel not fully ready yet)
+- Firewall/outbound restrictions preventing traffic to the PF gateway subnet
+
+If you run Gluetun with firewall restrictions, ensure outbound allows the PF gateway range (commonly `10.237.128.0/24`). See **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** for quick checks.

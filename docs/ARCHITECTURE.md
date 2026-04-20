@@ -173,7 +173,7 @@ flowchart TD
 | `/api/sessions/:id` | DELETE | Delete one session by id |
 | `/api/restart` | POST | Restart engine |
 | `/api/stop` | POST | Stop engine |
-| `/api/pia/regions` | GET | PIA WireGuard regions (PIA API proxy) |
+| `/api/pia/regions` | GET | PIA WireGuard regions (PIA API proxy). Query `portForwardOnly=1` / `true` filters to PF-capable regions (`port_forward=true`). |
 | `/api/pia/status` | GET | Last generate status |
 | `/api/pia/generate` | POST | PIA WireGuard generate |
 | `/api/pia/monitoring` | GET | Snapshot: `failCount`, `pfFailCount`, `connected`, `publicIp`, `port`, `checkInterval`, … |

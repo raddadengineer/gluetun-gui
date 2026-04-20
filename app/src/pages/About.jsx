@@ -1,4 +1,29 @@
+import { useEffect, useMemo, useState } from 'react';
+
 export default function About() {
+  const [about, setAbout] = useState(null);
+  const [aboutErr, setAboutErr] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/about');
+        if (!res.ok) throw new Error(`Failed to load version info (${res.status})`);
+        const data = await res.json();
+        if (!cancelled) setAbout(data);
+      } catch (e) {
+        if (!cancelled) setAboutErr(e.message || 'Failed to load version info');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const commitShort = useMemo(() => {
+    const sha = about?.git?.sha ? String(about.git.sha) : '';
+    return sha && sha.length > 12 ? sha.slice(0, 12) : sha || null;
+  }, [about]);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '900px' }}>
       <header className="header">
@@ -7,6 +32,37 @@ export default function About() {
           <p>Gluetun-GUI — a companion UI for the Gluetun VPN container</p>
         </div>
       </header>
+
+      <div className="glass-panel" style={{ padding: '28px 32px' }}>
+        <h3 style={{ fontSize: '17px', fontWeight: 600, margin: '0 0 12px 0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
+          Version
+        </h3>
+        {aboutErr ? (
+          <p style={{ fontSize: '13px', color: 'var(--danger)', margin: 0 }}>{aboutErr}</p>
+        ) : !about ? (
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <p style={{ fontSize: '14px', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
+              <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>gluetun-gui</strong>
+              {about.serverVersion ? ` v${about.serverVersion}` : ''}
+              {about.release ? ` • ${about.release}` : ''}
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: '6px 12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              <span>Commit</span>
+              <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
+                {commitShort || '—'}
+                {about.git?.ref ? ` (${about.git.ref})` : ''}
+              </span>
+              <span>Committed</span>
+              <span>{about.git?.committedAt || '—'}</span>
+              <span>Built</span>
+              <span>{about.build?.builtAt || '—'}</span>
+            </div>
+          </div>
+        )}
+      </div>
 
       <div className="glass-panel" style={{ padding: '28px 32px' }}>
         <h3 style={{ fontSize: '17px', fontWeight: 600, margin: '0 0 12px 0', display: 'flex', alignItems: 'center', gap: '10px' }}>

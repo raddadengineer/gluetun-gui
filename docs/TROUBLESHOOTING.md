@@ -39,6 +39,35 @@ Live logs use **Server-Sent Events** on **`GET /api/logs`**. If you put a **reve
 - **PIA / credentials:** confirm provider, user/password or WireGuard keys, and region lists in **Settings → VPN & tunnel**.
 - **Gluetun healthcheck loops:** see the [Gluetun healthcheck FAQ](https://github.com/qdm12/gluetun-wiki/blob/main/faq/healthcheck.md) (linked from Settings where relevant).
 
+## PIA port forwarding: `getSignature` timeout (`context deadline exceeded`)
+
+If Gluetun logs an error like:
+
+- `starting port forwarding service: ... Get "https://10.237.128.1:19999/getSignature?...": context deadline exceeded`
+
+it means Gluetun could not reach PIA’s port-forward gateway through the VPN tunnel in time.
+
+Fast checks:
+
+- **PF-capable region:** ensure the selected PIA region supports port forwarding (prefer CA/EU regions; many US-state labels lack PF servers).
+- **Pinned server name (WireGuard):** with PF on, the GUI may set `SERVER_NAMES=Server-...` to keep Gluetun on the exact PF-capable server selected by `pia-wg-config` (expected).
+- **Firewall/outbound rules:** if you use Gluetun firewall restrictions, allow the PF gateway subnet:
+  - `FIREWALL_OUTBOUND_SUBNETS=10.237.128.0/24` (typical)
+  - or broader `FIREWALL_OUTBOUND_SUBNETS=10.0.0.0/8` if you prefer simplicity
+- **Startup race:** if this only happens immediately after boot, a single Gluetun restart after the tunnel is up often clears it.
+
+## PIA WireGuard token fallback TLS errors
+
+If `pia-wg-config` logs:
+
+- `certificate relies on legacy Common Name field, use SANs instead`
+
+it will retry against the public token endpoint. If the retry fails with:
+
+- `certificate signed by unknown authority`
+
+the runtime environment likely lacks system root CAs (Alpine: install `ca-certificates`). This repo’s `Dockerfile` includes that package.
+
 ## Save / recreate errors
 
 - **Diff modal never completes:** check browser console and **`docker compose logs gluetun-gui`** for API errors.

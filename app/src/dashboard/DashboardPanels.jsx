@@ -26,6 +26,12 @@ export function ConnectionStatusWidget({ status, loading, piaMonitoring, isConne
               <span className="material-icons-round" style={{ fontSize: '14px' }}>dns</span>
               Active Node: {status.currentSession.serverIp || 'Resolving...'}
             </span>
+            {status.currentSession.server && (
+              <span style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span className="material-icons-round" style={{ fontSize: '14px' }}>badge</span>
+                Server: {status.currentSession.server}
+              </span>
+            )}
           </div>
         ) : isConnected && (
           <div style={{ margin: '6px 0 8px 0', fontSize: '13px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '4px' }}>

@@ -12,6 +12,73 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Public: safe metadata for the About page (no secrets)
+app.get('/api/about', async (req, res) => {
+    try {
+        res.json(await getAboutInfo());
+    } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to load about info' });
+    }
+});
+
+// ─── Build / version metadata (for About page) ────────────────────────────────
+let cachedAbout = null;
+async function getAboutInfo() {
+    if (cachedAbout) return cachedAbout;
+
+    const readJson = (p) => {
+        try {
+            return JSON.parse(fs.readFileSync(p, 'utf8'));
+        } catch {
+            return null;
+        }
+    };
+
+    const serverPkg = readJson(path.join(__dirname, 'package.json'));
+    // When serving the built SPA, the app package.json is not shipped; best-effort read if present.
+    const appPkg = readJson(path.join(__dirname, '..', 'app', 'package.json'));
+
+    const env = process.env;
+    const info = {
+        name: 'gluetun-gui',
+        serverVersion: serverPkg?.version || null,
+        appVersion: appPkg?.version || null,
+        release: env.GLUETUN_GUI_RELEASE || null,
+        git: {
+            sha: env.GLUETUN_GUI_GIT_SHA || null,
+            ref: env.GLUETUN_GUI_GIT_REF || null,
+            committedAt: env.GLUETUN_GUI_GIT_COMMITTED_AT || null,
+        },
+        build: {
+            builtAt: env.GLUETUN_GUI_BUILD_TIME || null,
+        },
+    };
+
+    const hasGit = !!(info.git.sha || info.git.ref || info.git.committedAt);
+    if (!hasGit && fs.existsSync(path.join(__dirname, '..', '.git'))) {
+        // Best-effort: if running from a git checkout (dev), try to read current commit.
+        const run = (args) =>
+            new Promise((resolve) => {
+                execFile('git', args, { cwd: path.join(__dirname, '..') }, (err, stdout) => {
+                    if (err) return resolve(null);
+                    const s = String(stdout || '').trim();
+                    resolve(s || null);
+                });
+            });
+
+        const sha = await run(['rev-parse', 'HEAD']);
+        const ref = await run(['rev-parse', '--abbrev-ref', 'HEAD']);
+        const committedAt = await run(['log', '-1', '--format=%cI']);
+
+        info.git.sha = sha;
+        info.git.ref = ref;
+        info.git.committedAt = committedAt;
+    }
+
+    cachedAbout = info;
+    return info;
+}
+
 const JWT_SECRET =
     process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim()
         ? String(process.env.JWT_SECRET).trim()
@@ -118,6 +185,13 @@ function startNewSession(containerId, startedAt, envVars) {
         provider: envVars.VPN_SERVICE_PROVIDER || 'unknown',
         vpnType: envVars.VPN_TYPE || 'wireguard',
         region: envVars.SERVER_COUNTRIES || envVars.SERVER_REGIONS || envVars.SERVER_NAMES || 'auto',
+        // Best-effort "server" label. For PIA WireGuard + port forwarding we pin SERVER_NAMES.
+        server: envVars.SERVER_NAMES ||
+            envVars.SERVER_HOSTNAMES ||
+            envVars.SERVER_REGIONS ||
+            envVars.SERVER_COUNTRIES ||
+            envVars.SERVER_CITIES ||
+            null,
         // interface-level bytes delta (filled by updateCurrentSession)
         interfaces: {}
     };
@@ -1866,6 +1940,7 @@ app.get('/api/pia/status', authenticateToken, (req, res) => {
 app.get('/api/pia/regions', async (req, res) => {
     try {
         const https = require('https');
+        const portForwardOnly = req.query.portForwardOnly === '1' || req.query.portForwardOnly === 'true';
         const data = await new Promise((resolve, reject) => {
             https.get('https://serverlist.piaservers.net/vpninfo/servers/v6', (resp) => {
                 let raw = '';
@@ -1877,11 +1952,12 @@ app.get('/api/pia/regions', async (req, res) => {
         const parsed = JSON.parse(jsonStr);
         const regions = parsed.regions
             .filter(r => !r.offline)
+            .filter(r => (portForwardOnly ? !!r.port_forward : true))
             .map(r => ({ id: r.id, name: r.name, portForward: r.port_forward }))
             .sort((a, b) => a.name.localeCompare(b.name));
         const offline = parsed.regions.length - regions.length;
         console.log(
-            `[ServerList] /api/pia/regions: ${regions.length} WireGuard regions from PIA (${offline} offline skipped)`,
+            `[ServerList] /api/pia/regions: ${regions.length} WireGuard regions from PIA (${offline} offline/PF filtered)`,
         );
         res.json(regions);
     } catch (err) {
@@ -2290,8 +2366,15 @@ async function checkVPN() {
                         }
                         lastForwardedPort = filePort;
                         console.log(`[Monitor] Port Forwarding Active (file): ${filePort}`);
-                    } else if (/Authentication Failed/i.test(portOutput)) {
+                    } else if (
                         // If control server is auth-protected and file isn't available, don't count as failure.
+                        // Gluetun's control server often returns a small plain-text body on auth failures.
+                        /Authentication Failed/i.test(portOutput) ||
+                        /\bUnauthorized\b/i.test(portOutput) ||
+                        /\bForbidden\b/i.test(portOutput) ||
+                        /requires auth/i.test(portOutput) ||
+                        /authentication/i.test(portOutput)
+                    ) {
                         pfFailCount = 0;
                         console.log('[Monitor] Port Forwarding check skipped (control server requires auth).');
                     } else {

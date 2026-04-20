@@ -238,7 +238,8 @@ export default function Settings() {
   const fetchPiaRegions = async () => {
     setFetchingPiaWgRegions(true);
     try {
-      const res = await fetch('/api/pia/regions');
+      const pfQ = piaPortForwarding ? '?portForwardOnly=1' : '';
+      const res = await fetch(`/api/pia/regions${pfQ}`);
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`Failed to fetch PIA regions (${res.status})${text ? `: ${text}` : ''}`);
@@ -251,7 +252,7 @@ export default function Settings() {
       notify({
         level: 'success',
         title: 'Regions updated',
-        message: `${regions.length} WireGuard region${regions.length === 1 ? '' : 's'} from PIA.`,
+        message: `${regions.length} WireGuard region${regions.length === 1 ? '' : 's'} from PIA${piaPortForwarding ? ' (port-forwarding only)' : ''}.`,
         source: 'settings',
         dedupeKey: 'pia_wg_regions_ok',
       });
