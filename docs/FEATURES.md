@@ -16,7 +16,7 @@ PIA-focused behavior (WireGuard vs OpenVPN, failover): **[PIA.md](PIA.md)**.
   - **Gluetun advanced** — Logging, health check, updater, system/public IP options, VPN hooks.
 - **PIA automation** — WireGuard via `pia-wg-config`; multi-region **auto-failover** and optional port forwarding; OpenVPN uses Gluetun **region** labels from `servers.json`, maps legacy **`server_name`** tokens on load/save, and when **port forwarding** is on (`PIA_PORT_FORWARDING` or `VPN_PORT_FORWARDING`) only **PF-capable** OpenVPN regions are kept or listed.
 - **Notifications** — In-app bell, deduped events (save, monitor, dashboard actions, log warnings), configurable sources and toast levels (`localStorage`).
-- **Themes** — Multiple readable themes (`localStorage`).
+- **Themes** — Card-based picker under **Settings → This app**; several dark, light, and high-readability palettes (`localStorage` key `gluetun_gui_theme_v1`). UI font tuned for on-screen reading (**Inter**).
 - **Docker** — Recreate Gluetun with merged env on every save/import; engine container resolved reliably (name `gluetun`, not `gluetun-gui`).
 
 ## Supported providers (Gluetun)

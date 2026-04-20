@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNotifications } from '../contexts/NotificationsContext';
-import { useTheme } from '../contexts/ThemeContext';
+import ThemePicker from '../components/ThemePicker';
 
 function isGuiPiaProvider(v) {
   return String(v || '').trim().toLowerCase() === 'private internet access';
@@ -16,7 +16,6 @@ function isGuiWireGuardType(v) {
 
 export default function Settings() {
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
-  const { theme, setTheme, themes } = useTheme();
   const [config, setConfig] = useState({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
@@ -1982,19 +1981,12 @@ export default function Settings() {
                 Appearance
               </h3>
 
-              <div className="form-group">
+              <div className="form-group theme-picker-wrap">
                 <label>Theme</label>
-                <select
-                  className="select-input"
-                  value={theme}
-                  onChange={(e) => setTheme(e.target.value)}
-                >
-                  {themes.map(t => (
-                    <option key={t.id} value={t.id}>{t.label}</option>
-                  ))}
-                </select>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                  Applied immediately and saved in this browser (<code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>localStorage</code>).
+                <ThemePicker />
+                <p className="theme-picker-hint">
+                  Applied immediately and saved in this browser (
+                  <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
                 </p>
               </div>
 
