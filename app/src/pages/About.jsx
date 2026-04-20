@@ -47,9 +47,13 @@ export default function About() {
             <p style={{ fontSize: '14px', color: 'var(--text-secondary)', lineHeight: 1.6, margin: 0 }}>
               <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>gluetun-gui</strong>
               {about.serverVersion ? ` v${about.serverVersion}` : ''}
-              {about.release ? ` • ${about.release}` : ''}
+              {about.release ? ` • release ${about.release}` : ''}
             </p>
             <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: '6px 12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+              <span>Changelog</span>
+              <span>
+                {about.changelogLatest?.line || '—'}
+              </span>
               <span>Commit</span>
               <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
                 {commitShort || '—'}

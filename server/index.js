@@ -34,16 +34,44 @@ async function getAboutInfo() {
         }
     };
 
+    const readText = (p) => {
+        try {
+            return fs.readFileSync(p, 'utf8');
+        } catch {
+            return null;
+        }
+    };
+
+    const parseLatestChangelogRelease = (mdText) => {
+        if (!mdText) return null;
+        const lines = String(mdText).split(/\r?\n/);
+        for (const line of lines) {
+            // Skip Unreleased; return the first bracketed version heading.
+            // Examples:
+            // ## [0.1.0] — 2026-04-19
+            // ## [1.2.3]
+            const m = line.match(/^##\s+\[(?!Unreleased\])([^\]]+)\]\s*(?:—\s*([0-9]{4}-[0-9]{2}-[0-9]{2}))?/);
+            if (!m) continue;
+            const version = (m[1] || '').trim();
+            const date = (m[2] || '').trim() || null;
+            return { version, date, line: line.trim() };
+        }
+        return null;
+    };
+
     const serverPkg = readJson(path.join(__dirname, 'package.json'));
     // When serving the built SPA, the app package.json is not shipped; best-effort read if present.
     const appPkg = readJson(path.join(__dirname, '..', 'app', 'package.json'));
+    const changelogText = readText(path.join(__dirname, '..', 'CHANGELOG.md'));
+    const changelogLatest = parseLatestChangelogRelease(changelogText);
 
     const env = process.env;
     const info = {
         name: 'gluetun-gui',
         serverVersion: serverPkg?.version || null,
         appVersion: appPkg?.version || null,
-        release: env.GLUETUN_GUI_RELEASE || null,
+        release: env.GLUETUN_GUI_RELEASE || changelogLatest?.version || null,
+        changelogLatest: changelogLatest || null,
         git: {
             sha: env.GLUETUN_GUI_GIT_SHA || null,
             ref: env.GLUETUN_GUI_GIT_REF || null,
