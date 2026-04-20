@@ -8,27 +8,26 @@ where version tags exist.
 
 ## [Unreleased]
 
-### Documentation
-
-- Added operator guides: troubleshooting, reverse proxy, PIA notes, environment reference, client stack patterns.
-- Added `CONTRIBUTING.md`, `SECURITY.md`, and root `LICENSE` (ISC).
-
-## [0.0.4.1] — 2026-04-20
-
-Patch release: packaging/docs polish and small monitoring improvements.
+## [0.4.1] — 2026-04-20
 
 ### Added
 
-- `patches/README.md` documenting the `pia-wg-config` TLS fallback patch applied during image builds.
+- About page: link the latest changelog line to GitHub `CHANGELOG.md`.
+- `patches/README.md` documenting the `pia-wg-config` TLS fallback patch; root README links to it.
 
 ### Changed
 
-- Port-forward monitoring now keys off `VPN_PORT_FORWARDING=on` as well as `PIA_PORT_FORWARDING`, so native Gluetun PF integrations work beyond PIA-only flows.
-- About page changelog line links to GitHub `CHANGELOG.md`.
+- Port-forward monitoring treats **`VPN_PORT_FORWARDING=on`** like PIA’s toggle for health checks (native Gluetun PF integrations for supported providers).
+- Dashboard VPN status widget shows a **server** label when available (e.g. pinned `SERVER_NAMES` for PIA WireGuard).
 
 ### Fixed
 
-- `/api/about` reads `CHANGELOG.md` from the runtime image path (`/usr/src/app/CHANGELOG.md`) so “latest release” is not empty in containers.
+- `/api/about` reads `CHANGELOG.md` from the runtime image path so the About page shows the latest release line in Docker builds.
+- Ignore `gui-homelab-state.json` in git (runtime/homelab timestamps should not be committed).
+
+### Documentation
+
+- `docs/MONITORING.md`, `docs/FEATURES.md`, `docs/ARCHITECTURE.md`, `docs/DOCKER.md` updated for `/api/about`, VPN port-forward monitoring semantics, and local image build notes (`build.sh`).
 
 ## [0.4.0] — 2026-04-20
 
@@ -64,6 +63,11 @@ This release focuses on day-to-day usability: dashboard customization, better no
 ## [0.1.0] — 2026-04-19
 
 Initial public documentation snapshot for the Docker-published stack.
+
+### Documentation
+
+- Added operator guides: troubleshooting, reverse proxy, PIA notes, environment reference, client stack patterns.
+- Added `CONTRIBUTING.md`, `SECURITY.md`, and root `LICENSE` (ISC).
 
 ### Highlights
 

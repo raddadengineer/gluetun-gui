@@ -7,3 +7,4 @@ node_modules/
 # Persistent data (user-specific)
 data/
 sessions.json
+**/gui-homelab-state.json

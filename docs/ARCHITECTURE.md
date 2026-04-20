@@ -129,7 +129,7 @@ Background **`checkVPN`** (starts after a short delay):
    - then `https://api.ipify.org?format=json`,
    - then plain **HTTP** `ipv4.icanhazip.com` or `checkip.amazonaws.com` (helps during OpenVPN bring-up when HTTPS is flaky).
 4. Docker **`exec`** stdout is **demuxed** (multiplexed stream) before parsing JSON/text.
-5. **PIA port forwarding** (if enabled in GUI env): control `/v1/portforward`, else read **`/tmp/gluetun/forwarded_port`**.
+5. **VPN port forwarding** (if enabled in GUI env: `VPN_PORT_FORWARDING=on` or `PIA_PORT_FORWARDING=on|true`): control `/v1/portforward`, else read **`/tmp/gluetun/forwarded_port`**.
 6. If **`failCount`** or **`pfFailCount`** ≥ **3**, runs **`executeFailoverRotation`**:
    - **WireGuard**: `pia-wg-config` for next region from `PIA_WG_REGIONS` / `PIA_REGIONS`.
    - **OpenVPN (PIA)**: next entry from **`PIA_OPENVPN_REGIONS` only**, resolved to a region label; if PF is on, skips regions not in **`getPiaOpenVpnPfRegionSet()`** before **`SERVER_REGIONS`** recreate.
@@ -164,6 +164,7 @@ flowchart TD
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/login` | POST | JWT |
+| `/api/about` | GET | App version + latest changelog release + optional build/git metadata (no auth) |
 | `/api/status` | GET | Engine status, `env[]`, **`image`**, **`imageId`**, **`containerName`**, session, **`gui`** (`VPN_SERVICE_PROVIDER`, `VPN_TYPE`, …), **`displayProvider`** |
 | `/api/metrics` | GET | Docker stats (engine container) |
 | `/api/config` | GET / POST | Read JSON config (async migrations on GET) / save + recreate |

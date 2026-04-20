@@ -43,7 +43,6 @@ Full feature list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 
 - **[LICENSE](LICENSE)** — ISC
 - **[CHANGELOG.md](CHANGELOG.md)** — release notes
-- **Current package version:** `0.0.4.1` (see `server/package.json`; also shown on **About**)
 - **[`patches/README.md`](patches/README.md)** — build-time patches (e.g. `pia-wg-config` TLS fallback)
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — local dev and PR expectations
 - **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities

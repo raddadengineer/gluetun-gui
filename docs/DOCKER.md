@@ -65,5 +65,6 @@ Extend **Gluetun** `ports:` if your apps need more published ports; clients can 
 
 - **Published releases:** `docker compose pull` to update the GUI from Docker Hub.
 - **Developing this repo:** build the image yourself (see root **`Dockerfile`**) so the server and built SPA match your checkout.
+- **Reproducible builds with metadata:** use root **`build.sh`** to inject git/build fields used by **`GET /api/about`** (and ensure `CHANGELOG.md` is present in the image for the “latest release” line).
 
 If something fails to start or connect, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.
