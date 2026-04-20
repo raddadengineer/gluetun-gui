@@ -37,6 +37,9 @@ COPY server/package*.json ./
 RUN npm install --production
 COPY server/ ./
 
+# Include changelog so /api/about can read latest release
+COPY CHANGELOG.md ./CHANGELOG.md
+
 # Copy compiled frontend to the backend's 'public' directory
 COPY --from=frontend-builder /app/dist ./public/
 

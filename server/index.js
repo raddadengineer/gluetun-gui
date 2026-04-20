@@ -62,7 +62,12 @@ async function getAboutInfo() {
     const serverPkg = readJson(path.join(__dirname, 'package.json'));
     // When serving the built SPA, the app package.json is not shipped; best-effort read if present.
     const appPkg = readJson(path.join(__dirname, '..', 'app', 'package.json'));
-    const changelogText = readText(path.join(__dirname, '..', 'CHANGELOG.md'));
+    // In the runtime image, Dockerfile copies CHANGELOG.md into /usr/src/app/CHANGELOG.md.
+    // In a dev checkout, CHANGELOG.md is at repo root (one level above server/).
+    const changelogText =
+        readText(path.join(__dirname, 'CHANGELOG.md')) ||
+        readText(path.join(__dirname, '..', 'CHANGELOG.md')) ||
+        null;
     const changelogLatest = parseLatestChangelogRelease(changelogText);
 
     const env = process.env;
