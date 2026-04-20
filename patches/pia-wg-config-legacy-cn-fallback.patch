@@ -1,0 +1,108 @@
+diff --git a/pia/pia.go b/pia/pia.go
+index 209f398..9a20c70 100644
+--- a/pia/pia.go
++++ b/pia/pia.go
+@@ -40,6 +40,8 @@ type PIAClient struct {
+ 	caCert           []byte
+ }
+ 
++const altPIATokenURL = "https://www.privateinternetaccess.com/api/client/v2/token"
++
+ type piaServerList struct {
+ 	Regions []struct {
+ 		ID          string `json:"id"`
+@@ -111,10 +113,22 @@ func (p *PIAClient) GetToken() (string, error) {
+ 	// Send request
+ 	resp, err := p.executePIARequest(server, url, "")
+ 	if err != nil {
++		// Some environments (older Go / strict TLS) may reject certs that rely on legacy Common Name.
++		// Retry token generation via the alternate endpoint which has proper SANs.
++		if isLegacyCNTLSError(err) {
++			if p.verbose {
++				log.Printf("Token request failed with legacy-CN TLS error; retrying via %s", altPIATokenURL)
++			}
++			resp, err = p.executePIATokenRequestAlt(altPIATokenURL)
++			if err == nil {
++				goto parseToken
++			}
++		}
+ 		return "", errors.Wrap(err, "error executing request")
+ 	}
+ 
+ 	// Parse response
++parseToken:
+ 	var tokenResp struct {
+ 		Token string `json:"token"`
+ 	}
+@@ -131,6 +145,71 @@ func (p *PIAClient) GetToken() (string, error) {
+ 	return tokenResp.Token, nil
+ }
+ 
++func isLegacyCNTLSError(err error) bool {
++	if err == nil {
++		return false
++	}
++	// Go 1.18+ message: "x509: certificate relies on legacy Common Name field, use SANs instead"
++	return strings.Contains(err.Error(), "x509: certificate relies on legacy Common Name field")
++}
++
++// executePIATokenRequestAlt executes a v2 token request against the public endpoint
++// (POST JSON body), using system DNS while still trusting the PIA CA bundle.
++func (p *PIAClient) executePIATokenRequestAlt(url string) (*http.Response, error) {
++	bodyBytes, err := json.Marshal(map[string]string{
++		"username": p.username,
++		"password": p.password,
++	})
++	if err != nil {
++		return nil, err
++	}
++
++	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
++	if err != nil {
++		return nil, err
++	}
++	req.Header.Set("Content-Type", "application/json")
++
++	// Add certificate to shared pool
++	err = p.downloadPIACertificate()
++	if err != nil {
++		return nil, errors.Wrap(err, "error downloading ca certificate")
++	}
++
++	// Use system roots + PIA CA (do not replace system trust),
++	// since the public endpoint is signed by public CAs.
++	caCertPool, _ := x509.SystemCertPool()
++	if caCertPool == nil {
++		caCertPool = x509.NewCertPool()
++	}
++	caCertPool.AppendCertsFromPEM(p.caCert)
++
++	client := &http.Client{
++		Transport: &http.Transport{
++			TLSClientConfig: &tls.Config{
++				RootCAs: caCertPool,
++			},
++		},
++	}
++
++	resp, err := client.Do(req)
++	if err != nil {
++		return nil, err
++	}
++
++	body, err := io.ReadAll(resp.Body)
++	if err != nil {
++		return nil, err
++	}
++	resp.Body = io.NopCloser(bytes.NewReader(body))
++
++	if resp.StatusCode != 200 {
++		return nil, fmt.Errorf("status code %v, response body: %s", resp.StatusCode, string(body))
++	}
++
++	return resp, nil
++}
++
+ // AddKey
+ func (p *PIAClient) AddKey(token, publickey string) (AddKeyResult, error) {
+ 	var addKeyResp AddKeyResult

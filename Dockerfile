@@ -1,8 +1,13 @@
 # Stage 1: Build pia-wg-config
 FROM golang:1.21-alpine AS go-builder
 RUN apk add --no-cache git
-RUN git clone https://github.com/Ephemeral-Dust/pia-wg-config.git /app \
+WORKDIR /app
+COPY patches/pia-wg-config-legacy-cn-fallback.patch /tmp/pia-wg-config-legacy-cn-fallback.patch
+RUN git clone https://github.com/Ephemeral-Dust/pia-wg-config.git /src \
+    && cd /src \
+    && git apply /tmp/pia-wg-config-legacy-cn-fallback.patch \
     && cd /app \
+    && cp -R /src/. /app/ \
     && go mod download \
     && go build -o pia-wg-config
 
@@ -17,6 +22,7 @@ RUN npm run build
 # Stage 3: Setup the Express Backend
 FROM node:18-alpine
 WORKDIR /usr/src/app
+RUN apk add --no-cache ca-certificates
 COPY server/package*.json ./
 RUN npm install --production
 COPY server/ ./
