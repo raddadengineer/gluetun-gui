@@ -24,6 +24,12 @@ export default function About() {
     return sha && sha.length > 12 ? sha.slice(0, 12) : sha || null;
   }, [about]);
 
+  const changelogHref = useMemo(() => {
+    // Default repo (matches Docker Hub namespace used by this project).
+    // If you fork, you can still click through and update the href easily later.
+    return 'https://github.com/raddadengineer/gluetun-gui/blob/main/CHANGELOG.md';
+  }, []);
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '32px', maxWidth: '900px' }}>
       <header className="header">
@@ -52,7 +58,17 @@ export default function About() {
             <div style={{ display: 'grid', gridTemplateColumns: '170px 1fr', gap: '6px 12px', fontSize: '12px', color: 'var(--text-secondary)' }}>
               <span>Changelog</span>
               <span>
-                {about.changelogLatest?.line || '—'}
+                {about.changelogLatest?.line ? (
+                  <a
+                    href={changelogHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: 'var(--accent-primary)', textDecoration: 'none', fontWeight: 600 }}
+                    title="View CHANGELOG.md on GitHub"
+                  >
+                    {about.changelogLatest.line}
+                  </a>
+                ) : '—'}
               </span>
               <span>Commit</span>
               <span style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
@@ -109,6 +125,7 @@ export default function About() {
         </h3>
         <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '12px' }}>
           {[
+            { href: 'https://github.com/raddadengineer/gluetun-gui', label: 'Gluetun-GUI (this app)', sub: 'Source code and releases' },
             { href: 'https://github.com/qdm12/gluetun', label: 'Gluetun (VPN client)', sub: 'Upstream project' },
             { href: 'https://github.com/qdm12/gluetun-wiki', label: 'Gluetun wiki', sub: 'Setup and FAQ' },
             { href: 'https://hub.docker.com/r/raddadengineer/gluetun-gui', label: 'Docker Hub — gluetun-gui', sub: 'Published image' },
