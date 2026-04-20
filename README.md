@@ -35,8 +35,16 @@ Full feature list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 
 ## Documentation
 
-- **[docs/README.md](docs/README.md)** — index (features, Docker, monitoring, operations)
+- **[docs/README.md](docs/README.md)** — full index (Docker, PIA, monitoring, proxy, troubleshooting, …)
+- **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** — common failures
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — diagrams, persistence, API route tables
+
+## Project meta
+
+- **[LICENSE](LICENSE)** — ISC
+- **[CHANGELOG.md](CHANGELOG.md)** — release notes
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — local dev and PR expectations
+- **[SECURITY.md](SECURITY.md)** — how to report vulnerabilities
 
 ## Developing locally
 

@@ -1,5 +1,7 @@
 # Features
 
+PIA-focused behavior (WireGuard vs OpenVPN, failover): **[PIA.md](PIA.md)**.
+
 - **Dashboard** — Connection state, provider label (GUI vs container), protocol, CPU/RAM, throughput chart, Gluetun **image / digest** (optional **Docker Hub digest** hint), **last manual VPN connectivity check**, PIA monitoring (connectivity + port forward). Quick actions: restart, **test VPN connectivity**, test failover, stop.
 - **Network** — Tunnel vs LAN traffic, per-interface stats, session peaks; **session history CSV export**.
 - **Session history** — Bandwidth and metadata across container restarts (`sessions.json`).

@@ -65,3 +65,5 @@ Extend **Gluetun** `ports:` if your apps need more published ports; clients can 
 
 - **Published releases:** `docker compose pull` to update the GUI from Docker Hub.
 - **Developing this repo:** build the image yourself (see root **`Dockerfile`**) so the server and built SPA match your checkout.
+
+If something fails to start or connect, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**.

@@ -14,4 +14,4 @@ The GUI server runs a **background monitor** (`checkVPN`) against the **Gluetun 
 
 Webhooks are **throttled per event type** (and `gluetun_container_missing` is limited to once per 5 minutes) to avoid storms during flapping.
 
-Webhook URLs and quiet hours are configured in the UI under **Settings → This app**; see [OPERATIONS.md](OPERATIONS.md) for environment variable names.
+Webhook URLs and quiet hours are configured in the UI under **Settings → This app**; see [OPERATIONS.md](OPERATIONS.md) for environment variable names. PIA-specific UI fields: **[PIA.md](PIA.md)**.

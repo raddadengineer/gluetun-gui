@@ -2,7 +2,7 @@
 
 This document describes **Gluetun-GUI**: containers, persistence, API routes, and main flows (settings, PIA WireGuard/OpenVPN, monitoring, failover, backup).
 
-Other guides: **[docs/README.md](README.md)** (index), **[FEATURES.md](FEATURES.md)**, **[DOCKER.md](DOCKER.md)**, **[MONITORING.md](MONITORING.md)**, **[OPERATIONS.md](OPERATIONS.md)**.
+Other guides: **[README.md](README.md)** (index), **[FEATURES.md](FEATURES.md)**, **[DOCKER.md](DOCKER.md)**, **[ENVIRONMENT.md](ENVIRONMENT.md)**, **[CLIENT-SERVICES.md](CLIENT-SERVICES.md)**, **[PIA.md](PIA.md)**, **[MONITORING.md](MONITORING.md)**, **[REVERSE-PROXY.md](REVERSE-PROXY.md)**, **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**, **[OPERATIONS.md](OPERATIONS.md)**.
 
 ## Topology
 
