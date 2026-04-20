@@ -2356,7 +2356,9 @@ async function checkVPN() {
             }
 
             const piaPfEnabled = envVars.PIA_PORT_FORWARDING === 'true' || envVars.PIA_PORT_FORWARDING === 'on';
-            if (piaPfEnabled && monitoringData.connected) {
+            const vpnPfEnabled = String(envVars.VPN_PORT_FORWARDING || '').toLowerCase() === 'on' || String(envVars.VPN_PORT_FORWARDING || '').toLowerCase() === 'true';
+            const pfEnabled = piaPfEnabled || vpnPfEnabled;
+            if (pfEnabled && monitoringData.connected) {
                 const getPortCmd = `wget -qO- --timeout=5 http://127.0.0.1:8000/v1/portforward`;
                 const portExec = await container.exec({ Cmd: ['sh', '-c', getPortCmd], AttachStdout: true, AttachStderr: true });
                 const portStream = await portExec.start();
