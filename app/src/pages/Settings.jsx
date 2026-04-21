@@ -25,6 +25,25 @@ function isGuiWireGuardType(v) {
   return String(v || 'wireguard').trim().toLowerCase() === 'wireguard';
 }
 
+function SettingsSubTabBar({ tabs, active, onActive }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '20px' }}>
+      {tabs.map((t) => (
+        <button
+          key={t.id}
+          type="button"
+          className={`tab-btn ${active === t.id ? 'active' : ''}`}
+          onClick={() => onActive(t.id)}
+          style={{ padding: '10px 14px', fontSize: '13px', borderRadius: '10px' }}
+        >
+          <span className="material-icons-round" style={{ fontSize: '18px', verticalAlign: 'middle', marginRight: '6px' }}>{t.icon}</span>
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export default function Settings() {
   const location = useLocation();
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
@@ -32,6 +51,13 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [activeTab, setActiveTab] = useState('general');
+  /** Sub-navigation for Settings → This app */
+  const [appSubTab, setAppSubTab] = useState('overview');
+  const [generalSubTab, setGeneralSubTab] = useState('basics');
+  const [dnsSubTab, setDnsSubTab] = useState('resolvers');
+  const [networkSubTab, setNetworkSubTab] = useState('firewall');
+  const [proxiesSubTab, setProxiesSubTab] = useState('shadowsocks');
+  const [advancedSubTab, setAdvancedSubTab] = useState('logging');
   const [dashPrefs, setDashPrefs] = useState(() => {
     const p = loadDashboardWidgetPrefs();
     return { hidden: [...p.hidden], layout: p.layout.map((x) => ({ ...x })) };
@@ -96,16 +122,53 @@ export default function Settings() {
   }, [refreshHomelabBackups]);
 
   useEffect(() => {
-    if (activeTab !== 'application') return undefined;
+    if (activeTab === 'application' && appSubTab === 'data') refreshHomelabBackups();
+  }, [activeTab, appSubTab, refreshHomelabBackups]);
+
+  useEffect(() => {
+    if (activeTab !== 'application' || appSubTab !== 'overview') return undefined;
     refreshEngineStatus();
     const id = setInterval(refreshEngineStatus, 60000);
     return () => clearInterval(id);
-  }, [activeTab, refreshEngineStatus]);
+  }, [activeTab, appSubTab, refreshEngineStatus]);
+
+  /** Faster VPN monitor snapshot while configuring Monitoring tab */
+  useEffect(() => {
+    if (activeTab !== 'application' || appSubTab !== 'monitoring') return undefined;
+    const token = localStorage.getItem('token');
+    const tick = () => {
+      fetch('/api/pia/monitoring', { headers: { Authorization: `Bearer ${token}` } })
+        .then(async (r) => {
+          if (!r.ok) throw new Error(String(r.status));
+          return r.json();
+        })
+        .then((data) => {
+          setPiaMonitoring({
+            failCount: Number.isFinite(Number(data?.failCount)) ? Number(data.failCount) : 0,
+            pfFailCount: Number.isFinite(Number(data?.pfFailCount)) ? Number(data.pfFailCount) : 0,
+            lastForwardedPort: data?.lastForwardedPort ?? null,
+            checkInterval: Number.isFinite(Number(data?.checkInterval)) ? Number(data.checkInterval) : 60 * 1000,
+            failThreshold: Number.isFinite(Number(data?.failThreshold)) ? Number(data.failThreshold) : 3,
+            checkIntervalHealthyMs: Number.isFinite(Number(data?.checkIntervalHealthyMs)) ? Number(data.checkIntervalHealthyMs) : null,
+            checkIntervalFailingMs: Number.isFinite(Number(data?.checkIntervalFailingMs)) ? Number(data.checkIntervalFailingMs) : null,
+            autostartDelayMs: Number.isFinite(Number(data?.autostartDelayMs)) ? Number(data.autostartDelayMs) : null,
+            autostartEnabled: typeof data?.autostartEnabled === 'boolean' ? data.autostartEnabled : null,
+          });
+        })
+        .catch(() => {});
+    };
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => clearInterval(id);
+  }, [activeTab, appSubTab]);
 
   useEffect(() => {
     const st = location.state;
     if (!st || (!st.settingsTab && !st.scrollTo)) return;
     if (st.settingsTab) setActiveTab(st.settingsTab);
+    if (st.settingsAppSub) setAppSubTab(st.settingsAppSub);
+    if (st.scrollTo === 'network-monitor') setAppSubTab('monitoring');
+    if (st.scrollTo === 'dashboard-widgets') setAppSubTab('dashboard');
     if (st.scrollTo) {
       requestAnimationFrame(() => {
         document.getElementById(st.scrollTo)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -246,6 +309,11 @@ export default function Settings() {
             pfFailCount: Number.isFinite(Number(data?.pfFailCount)) ? Number(data.pfFailCount) : 0,
             lastForwardedPort: data?.lastForwardedPort ?? null,
             checkInterval: Number.isFinite(Number(data?.checkInterval)) ? Number(data.checkInterval) : 30 * 1000,
+            failThreshold: Number.isFinite(Number(data?.failThreshold)) ? Number(data.failThreshold) : 3,
+            checkIntervalHealthyMs: Number.isFinite(Number(data?.checkIntervalHealthyMs)) ? Number(data.checkIntervalHealthyMs) : null,
+            checkIntervalFailingMs: Number.isFinite(Number(data?.checkIntervalFailingMs)) ? Number(data.checkIntervalFailingMs) : null,
+            autostartDelayMs: Number.isFinite(Number(data?.autostartDelayMs)) ? Number(data.autostartDelayMs) : null,
+            autostartEnabled: typeof data?.autostartEnabled === 'boolean' ? data.autostartEnabled : null,
           };
           setPiaMonitoring(safe);
         })
@@ -257,6 +325,7 @@ export default function Settings() {
             pfFailCount: 0,
             lastForwardedPort: null,
             checkInterval: 30 * 1000,
+            failThreshold: 3,
           });
         });
     };
@@ -869,7 +938,7 @@ export default function Settings() {
         <header className="header" style={{ marginBottom: 0 }}>
           <div className="header-title">
             <h2>Settings</h2>
-            <p>VPN and container settings are grouped by topic; GUI-only options are under <strong style={{ fontWeight: 600 }}>This app</strong>.</p>
+            <p>VPN and container settings are grouped by topic; each tab uses <strong style={{ fontWeight: 600 }}>subtabs</strong> where it helps. GUI-only options are under <strong style={{ fontWeight: 600 }}>This app</strong>.</p>
           </div>
         </header>
 
@@ -935,12 +1004,29 @@ export default function Settings() {
 
           {activeTab === 'general' && (
             <>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
+                <strong style={{ fontWeight: 600 }}>Basics</strong> picks provider and protocol. <strong style={{ fontWeight: 600 }}>Connection</strong> holds PIA flows or generic server lists plus WireGuard/OpenVPN material.
+              </p>
+              <SettingsSubTabBar
+                active={generalSubTab}
+                onActive={setGeneralSubTab}
+                tabs={[
+                  { id: 'basics', label: 'Basics', icon: 'tune' },
+                  {
+                    id: 'connection',
+                    label: isGuiPiaProvider(config.VPN_SERVICE_PROVIDER) ? 'PIA setup' : 'Servers & credentials',
+                    icon: 'link',
+                  },
+                ]}
+              />
+              {generalSubTab === 'basics' && (
+              <>
               <h3 style={{ fontSize: '16px', fontWeight: 600, margin: '0 0 4px 0', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ fontSize: '20px', color: 'var(--accent-primary)' }}>cloud</span>
                 Provider &amp; protocol
               </h3>
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
-                Choose who you connect through and whether Gluetun uses WireGuard or OpenVPN. Provider-specific options appear below.
+                Choose who you connect through and whether Gluetun uses WireGuard or OpenVPN. Provider-specific options are on the Connection subtab.
               </p>
               <div className="form-group">
                 <label>VPN Service Provider</label>
@@ -982,7 +1068,11 @@ export default function Settings() {
                   </select>
                 </div>
               </div>
+              </>
+              )}
 
+              {generalSubTab === 'connection' && (
+              <>
               {/* ── PIA Provider: Either/Or WireGuard or OpenVPN panels, no generic blocks ── */}
               {isGuiPiaProvider(config.VPN_SERVICE_PROVIDER) ? (
                 <>
@@ -1012,7 +1102,7 @@ export default function Settings() {
                             <div style={{ flex: 1 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <strong style={{ fontSize: '14px', color: '#fff' }}>
-                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/3)`}
+                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${piaMonitoring.failThreshold ?? 3})`}
                                 </strong>
                                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                                   Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
@@ -1027,7 +1117,7 @@ export default function Settings() {
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
                                       <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
-                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
+                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{piaMonitoring.failThreshold ?? 3})...</span>
                                     )}
                                   </span>
                                 </div>
@@ -1244,7 +1334,7 @@ export default function Settings() {
                             <div style={{ flex: 1 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <strong style={{ fontSize: '14px', color: '#fff' }}>
-                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/3)`}
+                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${piaMonitoring.failThreshold ?? 3})`}
                                 </strong>
                                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                                   Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
@@ -1259,7 +1349,7 @@ export default function Settings() {
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
                                       <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
-                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/3)...</span>
+                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{piaMonitoring.failThreshold ?? 3})...</span>
                                     )}
                                   </span>
                                 </div>
@@ -1678,15 +1768,27 @@ export default function Settings() {
                   )}
                 </>
               )} {/* end PIA ternary */}
+              </>
+              )}
 
             </>
           )}
 
           {activeTab === 'dns' && (
             <>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
-                Resolver settings and hostname blocklists run inside Gluetun. Public IP logging lives under <strong style={{ fontWeight: 600 }}>Gluetun advanced</strong> with the other <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>PUBLICIP_*</code> options.
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
+                Resolver and blocklist settings run inside Gluetun. Public IP logging lives under <strong style={{ fontWeight: 600 }}>Gluetun advanced</strong> → <strong style={{ fontWeight: 600 }}>System &amp; identity</strong>.
               </p>
+              <SettingsSubTabBar
+                active={dnsSubTab}
+                onActive={setDnsSubTab}
+                tabs={[
+                  { id: 'resolvers', label: 'Resolvers', icon: 'dns' },
+                  { id: 'filtering', label: 'Filtering & blocklists', icon: 'gpp_bad' },
+                ]}
+              />
+              {dnsSubTab === 'resolvers' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>dns</span>
                 Resolvers
@@ -1768,8 +1870,11 @@ export default function Settings() {
                 <label>Rebinding Protection Exempt Hostnames</label>
                 <input type="text" name="DNS_REBINDING_PROTECTION_EXEMPT_HOSTNAMES" value={config.DNS_REBINDING_PROTECTION_EXEMPT_HOSTNAMES || ''} onChange={handleChange} className="text-input" placeholder="Comma-separated public domain names" />
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '12px 0' }} />
+              {dnsSubTab === 'filtering' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--danger)' }}>gpp_bad</span>
                 Blocklists System
@@ -1807,14 +1912,26 @@ export default function Settings() {
                   <span className="slider"></span>
                 </label>
               </div>
+              </>
+              )}
             </>
           )}
 
           {activeTab === 'network' && (
             <>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
                 Firewall rules control what can reach the container; port forwarding is for inbound services through the VPN when your provider supports it.
               </p>
+              <SettingsSubTabBar
+                active={networkSubTab}
+                onActive={setNetworkSubTab}
+                tabs={[
+                  { id: 'firewall', label: 'Firewall', icon: 'security' },
+                  { id: 'portforward', label: 'Port forwarding', icon: 'hub' },
+                ]}
+              />
+              {networkSubTab === 'firewall' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px', marginTop: 0 }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>security</span>
                 Firewall
@@ -1864,9 +1981,11 @@ export default function Settings() {
                   <span className="slider"></span>
                 </label>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {networkSubTab === 'portforward' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>hub</span>
                 VPN Port Forwarding
@@ -1925,14 +2044,26 @@ export default function Settings() {
                   <input type="text" name="VPN_PORT_FORWARDING_DOWN_COMMAND" value={config.VPN_PORT_FORWARDING_DOWN_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="Shell command on PF teardown" />
                 </div>
               </div>
+              </>
+              )}
             </>
           )}
 
           {activeTab === 'proxies' && (
             <>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
                 Optional HTTP and Shadowsocks listeners on the Gluetun container so LAN clients can use the VPN without full-tunnel routing.
               </p>
+              <SettingsSubTabBar
+                active={proxiesSubTab}
+                onActive={setProxiesSubTab}
+                tabs={[
+                  { id: 'shadowsocks', label: 'Shadowsocks', icon: 'vpn_lock' },
+                  { id: 'http', label: 'HTTP proxy', icon: 'public' },
+                ]}
+              />
+              {proxiesSubTab === 'shadowsocks' && (
+              <>
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '12px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>info</span>
@@ -1986,9 +2117,11 @@ export default function Settings() {
                   <span className="slider"></span>
                 </label>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {proxiesSubTab === 'http' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>public</span>
                 HTTP Proxy
@@ -2043,97 +2176,120 @@ export default function Settings() {
                   </label>
                 </div>
               </div>
+              </>
+              )}
             </>
           )}
 
           {activeTab === 'application' && (
             <>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
-                These options affect this web UI only (login, notification bell, toasts). They are not passed to the Gluetun container.
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
+                GUI-only settings live in <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px' }}>gui-config.env</code> (saved with <strong style={{ fontWeight: 600 }}>Save All Changes</strong>) unless noted as browser-only. Pick a subtab below.
               </p>
+              <SettingsSubTabBar
+                active={appSubTab}
+                onActive={setAppSubTab}
+                tabs={[
+                  { id: 'overview', label: 'Overview', icon: 'home' },
+                  { id: 'monitoring', label: 'Monitoring', icon: 'sensors' },
+                  { id: 'appearance', label: 'Appearance', icon: 'palette' },
+                  { id: 'dashboard', label: 'Dashboard', icon: 'dashboard_customize' },
+                  { id: 'security', label: 'Security', icon: 'admin_panel_settings' },
+                  { id: 'notifications', label: 'Notifications', icon: 'notifications' },
+                  { id: 'data', label: 'Data & backup', icon: 'save_alt' },
+                ]}
+              />
 
-              <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
-                  <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>layers</span>
-                    Gluetun engine image
-                  </h3>
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={refreshEngineStatus}
-                    disabled={engineStatusLoading}
-                    style={{
-                      whiteSpace: 'nowrap',
-                      padding: '10px 14px',
-                      background: 'var(--surface-2)',
-                      border: '1px solid var(--glass-border)',
-                      color: 'var(--text-primary)',
-                      opacity: engineStatusLoading ? 0.7 : 1,
-                    }}
-                  >
-                    {engineStatusLoading ? 'Refreshing…' : 'Refresh'}
-                  </button>
-                </div>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.5 }}>
-                  This is the running VPN container image as seen by Docker (not a GUI setting). It was moved out of the Dashboard status card to reduce clutter.
-                </p>
-                {engineStatusErr ? (
-                  <p style={{ fontSize: '12px', color: 'var(--danger)', margin: 0 }}>{engineStatusErr}</p>
-                ) : !engineStatus ? (
-                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
-                ) : (
-                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
-                    <div style={{ wordBreak: 'break-all', color: 'var(--text-primary)', fontWeight: 600 }}>
-                      {engineStatus.image || '—'}
+              {appSubTab === 'overview' && (
+                <>
+                  <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
+                      <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>layers</span>
+                        Gluetun engine image
+                      </h3>
+                      <button
+                        type="button"
+                        className="btn"
+                        onClick={refreshEngineStatus}
+                        disabled={engineStatusLoading}
+                        style={{
+                          whiteSpace: 'nowrap',
+                          padding: '10px 14px',
+                          background: 'var(--surface-2)',
+                          border: '1px solid var(--glass-border)',
+                          color: 'var(--text-primary)',
+                          opacity: engineStatusLoading ? 0.7 : 1,
+                        }}
+                      >
+                        {engineStatusLoading ? 'Refreshing…' : 'Refresh'}
+                      </button>
                     </div>
-                    {engineStatus.imageId && (
-                      <div style={{ marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
-                        {String(engineStatus.imageId).length > 48 ? `${String(engineStatus.imageId).slice(0, 48)}…` : engineStatus.imageId}
-                      </div>
-                    )}
-                    {engineStatus.containerName && (
-                      <div style={{ marginTop: '6px' }}>
-                        Container: <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{engineStatus.containerName}</strong>
-                      </div>
-                    )}
-                    {engineStatus.imageUpdate?.updateAvailable && (
-                      <div style={{ marginTop: '10px', color: 'var(--warning)', fontWeight: 600 }}>
-                        Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
-                      </div>
-                    )}
-                    {engineStatus.imageUpdate?.checkError && !engineStatus.imageUpdate?.updateAvailable && (
-                      <div style={{ marginTop: '8px', opacity: 0.85 }}>
-                        Image update check: {engineStatus.imageUpdate.checkError}
+                    <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.5 }}>
+                      Running VPN container as seen by Docker (not written into <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>gui-config.env</code>).
+                    </p>
+                    {engineStatusErr ? (
+                      <p style={{ fontSize: '12px', color: 'var(--danger)', margin: 0 }}>{engineStatusErr}</p>
+                    ) : !engineStatus ? (
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
+                    ) : (
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                        <div style={{ wordBreak: 'break-all', color: 'var(--text-primary)', fontWeight: 600 }}>
+                          {engineStatus.image || '—'}
+                        </div>
+                        {engineStatus.imageId && (
+                          <div style={{ marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
+                            {String(engineStatus.imageId).length > 48 ? `${String(engineStatus.imageId).slice(0, 48)}…` : engineStatus.imageId}
+                          </div>
+                        )}
+                        {engineStatus.containerName && (
+                          <div style={{ marginTop: '6px' }}>
+                            Container: <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{engineStatus.containerName}</strong>
+                          </div>
+                        )}
+                        {engineStatus.imageUpdate?.updateAvailable && (
+                          <div style={{ marginTop: '10px', color: 'var(--warning)', fontWeight: 600 }}>
+                            Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
+                          </div>
+                        )}
+                        {engineStatus.imageUpdate?.checkError && !engineStatus.imageUpdate?.updateAvailable && (
+                          <div style={{ marginTop: '8px', opacity: 0.85 }}>
+                            Image update check: {engineStatus.imageUpdate.checkError}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
 
-              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>palette</span>
-                Appearance
-              </h3>
+              {appSubTab === 'appearance' && (
+                <>
+                  <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>palette</span>
+                    Appearance
+                  </h3>
 
-              <div className="form-group theme-picker-wrap">
-                <label>Theme</label>
-                <ThemePicker />
-                <p className="theme-picker-hint">
-                  Applied immediately and saved in this browser (
-                  <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
-                </p>
-              </div>
+                  <div className="form-group theme-picker-wrap">
+                    <label>Theme</label>
+                    <ThemePicker />
+                    <p className="theme-picker-hint">
+                      Applied immediately and saved in this browser (
+                      <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
+                    </p>
+                  </div>
+                </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {appSubTab === 'monitoring' && (
+                <>
               <div id="network-monitor" style={{ scrollMarginTop: '24px' }}>
                 <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>sensors</span>
-                  Network Monitor
+                  <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>show_chart</span>
+                  Network page (this browser)
                 </h3>
                 <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 14px 0', lineHeight: 1.5 }}>
-                  Controls the auto-refresh rate and chart history size on the <strong style={{ fontWeight: 600 }}>Network</strong> page. Stored in this browser only.
+                  Chart refresh rate and history for the <strong style={{ fontWeight: 600 }}>Network</strong> page only (<code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>localStorage</code>). Below: server-side VPN monitor and webhooks.
                 </p>
 
                 <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px' }}>
@@ -2247,8 +2403,143 @@ export default function Settings() {
                 </div>
               </div>
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
+              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '24px 0' }} />
 
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>monitor_heart</span>
+                VPN health monitor (server)
+              </h3>
+              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 14px 0', lineHeight: 1.5 }}>
+                The GUI process polls the Gluetun container from Node (Docker API + exec). Intervals apply after <strong style={{ fontWeight: 600 }}>Save All Changes</strong> (or container restart). Failover still uses PIA region lists from the VPN tab.
+              </p>
+
+              {piaMonitoring && (
+                <div className="glass-panel" style={{ padding: '14px 16px', borderRadius: '12px', marginBottom: '16px', border: '1px solid var(--glass-border)' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>Live snapshot</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                    <div>Connectivity failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.failCount}</strong> / {piaMonitoring.failThreshold ?? 3}</div>
+                    <div>PF failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.pfFailCount}</strong> / {piaMonitoring.failThreshold ?? 3}</div>
+                    <div>Next poll: <strong style={{ color: 'var(--text-primary)' }}>{Math.round((piaMonitoring.checkInterval || 60000) / 1000)}s</strong></div>
+                    <div>Autostart: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.autostartEnabled === false ? 'off' : 'on'}</strong></div>
+                  </div>
+                </div>
+              )}
+
+              <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
+                <h4 style={{ margin: '0 0 12px 0', fontSize: '15px', fontWeight: 600 }}>Startup</h4>
+                <div className="toggle-switch-container" style={{ padding: '12px 14px', background: 'var(--surface-2)', borderRadius: '10px', border: '1px solid var(--glass-border)', marginBottom: '12px' }}>
+                  <div className="toggle-info">
+                    <strong style={{ fontSize: '15px' }}>Autostart Gluetun</strong>
+                    <span style={{ color: 'var(--text-secondary)' }}>If the engine is down but <code style={{ fontSize: '11px' }}>gui-config.env</code> has a full VPN profile, apply it after GUI starts (same as Save &amp; connect). Stored as <code style={{ fontSize: '11px' }}>GUI_AUTOSTART_GLUETUN</code>. Docker env overrides when unset in the file.</span>
+                  </div>
+                  <label className="switch">
+                    <input
+                      type="checkbox"
+                      checked={config.GUI_AUTOSTART_GLUETUN !== 'off' && config.GUI_AUTOSTART_GLUETUN !== 'false' && config.GUI_AUTOSTART_GLUETUN !== '0' && config.GUI_AUTOSTART_GLUETUN !== 'no'}
+                      onChange={(e) => setConfig((c) => ({ ...c, GUI_AUTOSTART_GLUETUN: e.target.checked ? 'on' : 'off' }))}
+                    />
+                    <span className="slider"></span>
+                  </label>
+                </div>
+                <div className="form-group" style={{ marginBottom: 0 }}>
+                  <label>Autostart delay (ms)</label>
+                  <input
+                    type="number"
+                    name="GUI_AUTOSTART_DELAY_MS"
+                    min={0}
+                    max={300000}
+                    step={100}
+                    value={config.GUI_AUTOSTART_DELAY_MS ?? ''}
+                    onChange={handleChange}
+                    className="text-input"
+                    placeholder="2500"
+                  />
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                    Wait after HTTP listen before running autostart (0–300000). Default 2500. Takes effect after save + GUI restart (or redeploy).
+                  </p>
+                </div>
+              </div>
+
+              <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
+                <h4 style={{ margin: '0 0 12px 0', fontSize: '15px', fontWeight: 600 }}>Poll intervals &amp; thresholds</h4>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Healthy interval (ms)</label>
+                    <input type="number" name="GUI_MONITOR_INTERVAL_MS_HEALTHY" min={30000} max={86400000} step={1000} value={config.GUI_MONITOR_INTERVAL_MS_HEALTHY ?? ''} onChange={handleChange} className="text-input" placeholder="900000" />
+                    <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>Default 900000 (15 min). Used when VPN and PF checks are clean.</p>
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Failing interval (ms)</label>
+                    <input type="number" name="GUI_MONITOR_INTERVAL_MS_FAILING" min={10000} max={3600000} step={1000} value={config.GUI_MONITOR_INTERVAL_MS_FAILING ?? ''} onChange={handleChange} className="text-input" placeholder="60000" />
+                    <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>Default 60000 (1 min). Used while failures are accumulating or during warm-up skips.</p>
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Failures before auto-failover</label>
+                    <input type="number" name="GUI_MONITOR_FAIL_THRESHOLD" min={1} max={20} step={1} value={config.GUI_MONITOR_FAIL_THRESHOLD ?? ''} onChange={handleChange} className="text-input" placeholder="3" />
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Warm-up WireGuard (ms)</label>
+                    <input type="number" name="GUI_MONITOR_WARMUP_WIREGUARD_MS" min={5000} max={600000} step={1000} value={config.GUI_MONITOR_WARMUP_WIREGUARD_MS ?? ''} onChange={handleChange} className="text-input" placeholder="25000" />
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Warm-up OpenVPN (ms)</label>
+                    <input type="number" name="GUI_MONITOR_WARMUP_OPENVPN_MS" min={15000} max={900000} step={1000} value={config.GUI_MONITOR_WARMUP_OPENVPN_MS ?? ''} onChange={handleChange} className="text-input" placeholder="120000" />
+                  </div>
+                </div>
+                <p style={{ fontSize: '11px', color: 'var(--text-secondary)', margin: '12px 0 0 0' }}>
+                  Save with <strong style={{ fontWeight: 600 }}>Save All Changes</strong>; the monitor reads these from disk on the next poll (no GUI restart). <strong style={{ fontWeight: 600 }}>Autostart delay</strong> only applies at GUI process start — change it, save, then restart the GUI container.
+                </p>
+              </div>
+
+              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>webhook</span>
+                Outbound webhooks
+              </h3>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
+                Optional HTTP POST when the monitor detects loss of connectivity, port forwarding failures, or a missing Gluetun container. JSON body includes <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>event</code>, <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>timestamp</code>, and details. Not passed to Gluetun.
+              </p>
+              <div className="form-group">
+                <label>Webhook URL</label>
+                <input type="url" name="GUI_NOTIFY_WEBHOOK_URL" value={config.GUI_NOTIFY_WEBHOOK_URL || ''} onChange={handleChange} className="text-input" placeholder="https://example.com/hooks/gluetun" />
+              </div>
+              <div className="form-group">
+                <label>Webhook bearer secret (optional)</label>
+                <input type="password" name="GUI_NOTIFY_WEBHOOK_SECRET" value={config.GUI_NOTIFY_WEBHOOK_SECRET || ''} onChange={handleChange} className="text-input" placeholder="Sent as Authorization: Bearer …" autoComplete="off" />
+              </div>
+
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
+                Quiet hours use the <strong style={{ fontWeight: 600 }}>server clock</strong> (usually UTC in Docker). No outbound webhook POSTs are sent during this window.
+              </p>
+              <div className="toggle-switch-container" style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '12px' }}>
+                <div className="toggle-info">
+                  <strong style={{ fontSize: '15px' }}>Webhook quiet hours</strong>
+                  <span style={{ color: 'var(--text-secondary)' }}>Suppress monitor webhooks</span>
+                </div>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    name="GUI_NOTIFY_QUIET_ENABLED"
+                    checked={config.GUI_NOTIFY_QUIET_ENABLED === 'on' || config.GUI_NOTIFY_QUIET_ENABLED === 'true'}
+                    onChange={(e) => setConfig((c) => ({ ...c, GUI_NOTIFY_QUIET_ENABLED: e.target.checked ? 'on' : 'off' }))}
+                  />
+                  <span className="slider"></span>
+                </label>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+                <div className="form-group">
+                  <label>Quiet start (HH:MM)</label>
+                  <input type="text" name="GUI_NOTIFY_QUIET_START" value={config.GUI_NOTIFY_QUIET_START || '22:00'} onChange={handleChange} className="text-input" placeholder="22:00" />
+                </div>
+                <div className="form-group">
+                  <label>Quiet end (HH:MM)</label>
+                  <input type="text" name="GUI_NOTIFY_QUIET_END" value={config.GUI_NOTIFY_QUIET_END || '07:00'} onChange={handleChange} className="text-input" placeholder="07:00" />
+                </div>
+              </div>
+                </>
+              )}
+
+              {appSubTab === 'dashboard' && (
+              <>
               <div id="dashboard-widgets" style={{ scrollMarginTop: '24px' }}>
                 <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>dashboard_customize</span>
@@ -2300,9 +2591,11 @@ export default function Settings() {
                   </button>
                 </div>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {appSubTab === 'security' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>admin_panel_settings</span>
                 GUI security
@@ -2335,56 +2628,11 @@ export default function Settings() {
                   />
                 </div>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
-              <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>webhook</span>
-                Outbound webhooks
-              </h3>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.5 }}>
-                Optional HTTP POST for automation when the monitor detects loss of connectivity, port forwarding failures, or a missing Gluetun container. JSON body includes <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>event</code>, <code style={{ fontSize: '11px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>timestamp</code>, and details. Not passed to Gluetun.
-              </p>
-              <div className="form-group">
-                <label>Webhook URL</label>
-                <input type="url" name="GUI_NOTIFY_WEBHOOK_URL" value={config.GUI_NOTIFY_WEBHOOK_URL || ''} onChange={handleChange} className="text-input" placeholder="https://example.com/hooks/gluetun" />
-              </div>
-              <div className="form-group">
-                <label>Webhook bearer secret (optional)</label>
-                <input type="password" name="GUI_NOTIFY_WEBHOOK_SECRET" value={config.GUI_NOTIFY_WEBHOOK_SECRET || ''} onChange={handleChange} className="text-input" placeholder="Sent as Authorization: Bearer …" autoComplete="off" />
-              </div>
-
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 8px 0' }}>
-                Quiet hours use the <strong style={{ fontWeight: 600 }}>server clock</strong> (usually UTC in Docker). No outbound webhook POSTs are sent during this window.
-              </p>
-              <div className="toggle-switch-container" style={{ padding: '12px 16px', background: 'var(--surface-2)', borderRadius: '12px', border: '1px solid var(--glass-border)', marginBottom: '12px' }}>
-                <div className="toggle-info">
-                  <strong style={{ fontSize: '15px' }}>Webhook quiet hours</strong>
-                  <span style={{ color: 'var(--text-secondary)' }}>Suppress monitor webhooks (GUI .env)</span>
-                </div>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    name="GUI_NOTIFY_QUIET_ENABLED"
-                    checked={config.GUI_NOTIFY_QUIET_ENABLED === 'on' || config.GUI_NOTIFY_QUIET_ENABLED === 'true'}
-                    onChange={(e) => setConfig((c) => ({ ...c, GUI_NOTIFY_QUIET_ENABLED: e.target.checked ? 'on' : 'off' }))}
-                  />
-                  <span className="slider"></span>
-                </label>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-                <div className="form-group">
-                  <label>Quiet start (HH:MM)</label>
-                  <input type="text" name="GUI_NOTIFY_QUIET_START" value={config.GUI_NOTIFY_QUIET_START || '22:00'} onChange={handleChange} className="text-input" placeholder="22:00" />
-                </div>
-                <div className="form-group">
-                  <label>Quiet end (HH:MM)</label>
-                  <input type="text" name="GUI_NOTIFY_QUIET_END" value={config.GUI_NOTIFY_QUIET_END || '07:00'} onChange={handleChange} className="text-input" placeholder="07:00" />
-                </div>
-              </div>
-
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {appSubTab === 'notifications' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>notifications</span>
                 Notifications
@@ -2492,9 +2740,11 @@ export default function Settings() {
                   </div>
                 </div>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {appSubTab === 'data' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>save_alt</span>
                 Backup &amp; restore
@@ -2672,6 +2922,8 @@ export default function Settings() {
                   </div>
                 </div>
               )}
+              </>
+              )}
             </>
           )}
 
@@ -2680,10 +2932,24 @@ export default function Settings() {
               <div style={{ padding: '16px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.1)', border: '1px solid var(--glass-highlight)', marginBottom: '16px' }}>
                 <p style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0 }}>
                   <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>warning</span>
-                  Low-level Gluetun container options. GUI login and notification preferences are under <strong style={{ fontWeight: 600 }}>This app</strong>.
+                  Low-level Gluetun container options. GUI-only preferences are under <strong style={{ fontWeight: 600 }}>This app</strong> (subtabs: Monitoring, Security, …).
                 </p>
               </div>
 
+              <SettingsSubTabBar
+                active={advancedSubTab}
+                onActive={setAdvancedSubTab}
+                tabs={[
+                  { id: 'logging', label: 'Logging', icon: 'bug_report' },
+                  { id: 'health', label: 'Health check', icon: 'monitor_heart' },
+                  { id: 'updater', label: 'Server updater', icon: 'update' },
+                  { id: 'system', label: 'System & identity', icon: 'settings' },
+                  { id: 'hooks', label: 'VPN hooks', icon: 'terminal' },
+                ]}
+              />
+
+              {advancedSubTab === 'logging' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>bug_report</span>
                 Logging &amp; debugging
@@ -2698,9 +2964,11 @@ export default function Settings() {
                   <option value="error">Error</option>
                 </select>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {advancedSubTab === 'health' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>monitor_heart</span>
                 Health check
@@ -2732,9 +3000,11 @@ export default function Settings() {
                 <label>Health Server Address</label>
                 <input type="text" name="HEALTH_SERVER_ADDRESS" value={config.HEALTH_SERVER_ADDRESS || ''} onChange={handleChange} className="text-input" placeholder="127.0.0.1:9999" />
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-              
+              {advancedSubTab === 'updater' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>update</span>
                 Servers Updater
@@ -2767,9 +3037,11 @@ export default function Settings() {
                   <input type="password" name="UPDATER_PROTONVPN_PASSWORD" value={config.UPDATER_PROTONVPN_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="ProtonVPN account password" />
                 </div>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-              
+              {advancedSubTab === 'system' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>settings</span>
                 System &amp; identity
@@ -2833,9 +3105,11 @@ export default function Settings() {
                   <span className="slider"></span>
                 </label>
               </div>
+              </>
+              )}
 
-              <hr style={{ border: 'none', borderTop: '1px solid var(--glass-border)', margin: '16px 0' }} />
-
+              {advancedSubTab === 'hooks' && (
+              <>
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>terminal</span>
                 VPN Lifecycle Hooks
@@ -2893,6 +3167,8 @@ export default function Settings() {
                   <input type="text" name="VPN_DOWN_COMMAND" value={config.VPN_DOWN_COMMAND || ''} onChange={handleChange} className="text-input" placeholder="/bin/sh -c 'echo disconnected'" />
                 </div>
               </div>
+              </>
+              )}
 
             </>
           )}

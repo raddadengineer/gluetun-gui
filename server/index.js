@@ -804,22 +804,56 @@ function readGuiEnvConfigMapFromDisk() {
     return config;
 }
 
-function isAutostartGluetunEnabled() {
-    const v = String(process.env.GUI_AUTOSTART_GLUETUN || 'on').trim().toLowerCase();
-    return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+/** Last Gluetun env snapshot + GUI env; GUI keys win. Used so autostart sees creds/material often stored only in `gluetun.env`. */
+function readMergedAutostartConfig() {
+    const fromGluetun = parseEnvFileToMap(GLUETUN_ENV_PATH);
+    const fromGui = readGuiEnvConfigMapFromDisk();
+    return { ...fromGluetun, ...fromGui };
 }
 
 function looksLikeSavedVpnSettings(config) {
     const c = config || {};
     const hasProvider = !!String(c.VPN_SERVICE_PROVIDER || '').trim();
-    const hasVpnType = !!String(c.VPN_TYPE || '').trim();
+    if (!hasProvider) return false;
+
+    const vpnType = String(c.VPN_TYPE || '').trim().toLowerCase();
     const hasOpenVpnCreds = !!String(c.OPENVPN_USER || '').trim() && !!String(c.OPENVPN_PASSWORD || '').trim();
     const hasPiaCreds = !!String(c.PIA_USERNAME || '').trim() && !!String(c.PIA_PASSWORD || '').trim();
-    const hasWgMaterial =
-        !!String(c.WIREGUARD_PRIVATE_KEY || '').trim() &&
+    const wgKey = !!String(c.WIREGUARD_PRIVATE_KEY || '').trim();
+    const hasWgAddrOrEndpoint =
+        wgKey &&
         (!!String(c.WIREGUARD_ADDRESSES || '').trim() ||
             (!!String(c.WIREGUARD_ENDPOINT_IP || '').trim() && !!String(c.WIREGUARD_ENDPOINT_PORT || '').trim()));
-    return (hasProvider && hasVpnType && (hasOpenVpnCreds || hasPiaCreds || hasWgMaterial));
+    // Key + provider: enough for many WireGuard setups (and matches Gluetun "Save" when UI/env omits addresses)
+    const hasWgKeyWithProvider = wgKey && hasProvider && (!vpnType || vpnType === 'wireguard');
+
+    if (vpnType === 'openvpn') {
+        return hasOpenVpnCreds || hasPiaCreds;
+    }
+    if (vpnType === 'wireguard') {
+        return hasPiaCreds || hasWgAddrOrEndpoint || hasWgKeyWithProvider;
+    }
+    // VPN_TYPE missing from files: still autostart if creds/material are obvious
+    return hasOpenVpnCreds || hasPiaCreds || hasWgAddrOrEndpoint || hasWgKeyWithProvider;
+}
+
+/** Non-secret hints for logs when autostart is skipped */
+function describeVpnProfileGap(config) {
+    const c = config || {};
+    const parts = [];
+    if (!String(c.VPN_SERVICE_PROVIDER || '').trim()) parts.push('VPN_SERVICE_PROVIDER empty');
+    const vt = String(c.VPN_TYPE || '').trim();
+    if (!vt) parts.push('VPN_TYPE empty');
+    const hasOv = !!String(c.OPENVPN_USER || '').trim() && !!String(c.OPENVPN_PASSWORD || '').trim();
+    const hasPia = !!String(c.PIA_USERNAME || '').trim() && !!String(c.PIA_PASSWORD || '').trim();
+    const wgKey = !!String(c.WIREGUARD_PRIVATE_KEY || '').trim();
+    const wgEp =
+        wgKey &&
+        (!!String(c.WIREGUARD_ADDRESSES || '').trim() ||
+            (!!String(c.WIREGUARD_ENDPOINT_IP || '').trim() && !!String(c.WIREGUARD_ENDPOINT_PORT || '').trim()));
+    if (!hasOv && !hasPia && !wgKey) parts.push('no OPENVPN_*, PIA_*, or WIREGUARD_PRIVATE_KEY (merge gui-config.env + gluetun.env)');
+    else if (wgKey && !wgEp && !hasPia && !hasOv) parts.push('WireGuard key but no addresses/endpoint and no PIA/OpenVPN creds');
+    return parts.join('; ') || 'profile incomplete';
 }
 
 async function engineContainerRunningState() {
@@ -903,6 +937,13 @@ async function applyGuiConfiguration(config) {
         'GUI_BACKUP_INTERVAL_HOURS',
         'GUI_BACKUP_RETENTION',
         'GUI_DIFF_HISTORY_MAX',
+        'GUI_AUTOSTART_GLUETUN',
+        'GUI_AUTOSTART_DELAY_MS',
+        'GUI_MONITOR_INTERVAL_MS_HEALTHY',
+        'GUI_MONITOR_INTERVAL_MS_FAILING',
+        'GUI_MONITOR_FAIL_THRESHOLD',
+        'GUI_MONITOR_WARMUP_WIREGUARD_MS',
+        'GUI_MONITOR_WARMUP_OPENVPN_MS',
     ];
     const gluetunEnv = { ...config };
     guiOnlyKeys.forEach(k => delete gluetunEnv[k]);
@@ -1821,6 +1862,58 @@ function writeGuiEnv(obj) {
     fs.writeFileSync(ENV_PATH, s, 'utf8');
 }
 
+/** Integer from `gui-config.env`, else process.env, else default (clamped). */
+function getGuiSettingInt(key, def, min, max) {
+    const gui = readGuiEnv();
+    const g = gui[key];
+    if (g !== undefined && g !== null && String(g).trim() !== '') {
+        const n = parseInt(String(g), 10);
+        if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
+    }
+    const e = process.env[key];
+    if (e !== undefined && e !== null && String(e).trim() !== '') {
+        const n = parseInt(String(e), 10);
+        if (Number.isFinite(n)) return Math.min(max, Math.max(min, n));
+    }
+    return Math.min(max, Math.max(min, def));
+}
+
+function getMonitorFailThreshold() {
+    return getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD', 3, 1, 20);
+}
+
+function getMonitorIntervalHealthyMs() {
+    return getGuiSettingInt('GUI_MONITOR_INTERVAL_MS_HEALTHY', 15 * 60 * 1000, 30_000, 24 * 60 * 60 * 1000);
+}
+
+function getMonitorIntervalFailingMs() {
+    return getGuiSettingInt('GUI_MONITOR_INTERVAL_MS_FAILING', 60 * 1000, 10_000, 60 * 60 * 1000);
+}
+
+function getMonitorWarmupWireguardMs() {
+    return getGuiSettingInt('GUI_MONITOR_WARMUP_WIREGUARD_MS', 25_000, 5_000, 600_000);
+}
+
+function getMonitorWarmupOpenvpnMs() {
+    return getGuiSettingInt('GUI_MONITOR_WARMUP_OPENVPN_MS', 120_000, 15_000, 900_000);
+}
+
+function getAutostartDelayMs() {
+    return getGuiSettingInt('GUI_AUTOSTART_DELAY_MS', 2500, 0, 300_000);
+}
+
+/** `gui-config.env` wins when set; otherwise Docker `GUI_AUTOSTART_GLUETUN` (default on). */
+function isAutostartGluetunEnabled() {
+    const gui = readGuiEnv();
+    const g = gui.GUI_AUTOSTART_GLUETUN;
+    if (g !== undefined && g !== null && String(g).trim() !== '') {
+        const v = String(g).trim().toLowerCase();
+        return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+    }
+    const v = String(process.env.GUI_AUTOSTART_GLUETUN || 'on').trim().toLowerCase();
+    return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
 /**
  * Run pia-wg-config, write Gluetun env + GUI .env, recreate Gluetun container.
  * @param {string} opts.PIA_REGION — region id passed to pia-wg-config -r
@@ -2101,9 +2194,6 @@ let lastForwardedPort = null;
 let lastMonitoringSnapshot = null;
 let prevCheckVpnFailCount = 0;
 let prevCheckVpnPfFailCount = 0;
-const FAIL_THRESHOLD = 3;
-const CHECK_INTERVAL = 60 * 1000;          // 1 minute when failing
-const HEALTHY_INTERVAL = 15 * 60 * 1000;    // 15 minutes when healthy
 
 /** Docker exec attach returns multiplexed stdout/stderr (8-byte header per frame). Strip to plain text. */
 function demuxDockerExecOutput(buf) {
@@ -2290,8 +2380,11 @@ async function maybeAutostartGluetunOnStartup() {
         return;
     }
 
-    const config = readGuiEnvConfigMapFromDisk();
-    if (!looksLikeSavedVpnSettings(config)) {
+    const merged = readMergedAutostartConfig();
+    if (!looksLikeSavedVpnSettings(merged)) {
+        console.log(
+            `[Startup] Autostart skipped (incomplete VPN profile while engine ${engine.exists ? engine.status || 'down' : 'missing'}): ${describeVpnProfileGap(merged)}`,
+        );
         return;
     }
 
@@ -2299,12 +2392,11 @@ async function maybeAutostartGluetunOnStartup() {
         console.log(
             `[Startup] Gluetun not running (${engine.exists ? engine.status || 'unknown' : 'missing'}); applying saved GUI config (save + recreate)…`,
         );
-        await migrateGuiEnvConfigInPlace(config);
-        const refreshed = readGuiEnvConfigMapFromDisk();
-        const out = await applyGuiConfiguration(refreshed);
+        await migrateGuiEnvConfigInPlace(merged);
+        const out = await applyGuiConfiguration(merged);
         console.log(`[Startup] Autostart apply complete: ${out.message}`);
 
-        const vpnType = String(refreshed.VPN_TYPE || 'wireguard').toLowerCase();
+        const vpnType = String(merged.VPN_TYPE || 'wireguard').toLowerCase();
         const delayMs = vpnType === 'openvpn' ? 8000 : 3500;
         await new Promise((r) => setTimeout(r, delayMs));
         const probe = await runOutboundConnectivityProbePersist();
@@ -2406,6 +2498,10 @@ async function executeFailoverRotation() {
 }
 
 async function checkVPN() {
+    const failTh = getMonitorFailThreshold();
+    const msFail = getMonitorIntervalFailingMs();
+    const msHealthy = getMonitorIntervalHealthyMs();
+
     mergeHomelabState({ lastMonitorTickAt: new Date().toISOString() });
 
     let monitoringData = {
@@ -2423,7 +2519,7 @@ async function checkVPN() {
         if (!gluetun) {
             console.log('[Monitor] Gluetun container not found. Retrying...');
             notifyWebhook('gluetun_container_missing', { message: 'Gluetun engine container not found' });
-            return setTimeout(checkVPN, CHECK_INTERVAL);
+            return setTimeout(checkVPN, msFail);
         }
 
         const containerId = gluetun.Id;
@@ -2436,7 +2532,7 @@ async function checkVPN() {
         // OpenVPN needs longer than WireGuard before outbound HTTPS is reliable; skip counting failures during bring-up.
         const startedAtMs = inspectData?.State?.StartedAt ? Date.parse(inspectData.State.StartedAt) : 0;
         const ageMs = startedAtMs ? (Date.now() - startedAtMs) : 0;
-        const warmupMs = vpnTypeMon === 'openvpn' ? 120000 : 25000;
+        const warmupMs = vpnTypeMon === 'openvpn' ? getMonitorWarmupOpenvpnMs() : getMonitorWarmupWireguardMs();
         const isWarmingUp = ageMs > 0 && ageMs < warmupMs;
 
         if (inspectData.State.Status !== 'running') {
@@ -2448,14 +2544,14 @@ async function checkVPN() {
                     `[Monitor] Skipping connectivity check during warm-up (${Math.round(ageMs / 1000)}s / ${Math.round(warmupMs / 1000)}s, ${vpnTypeMon}).`,
                 );
                 lastMonitoringSnapshot = { ...monitoringData, timestamp: new Date().toISOString(), warmup: true, vpnType: vpnTypeMon };
-                return setTimeout(checkVPN, CHECK_INTERVAL);
+                return setTimeout(checkVPN, msFail);
             }
 
             const ipResult = await execResolvePublicIp(container, vpnTypeMon);
             if (ipResult.ok) {
                 monitoringData.publicIp = ipResult.publicIp || 'unknown';
                 monitoringData.connected = true;
-                if (prevCheckVpnFailCount >= FAIL_THRESHOLD) {
+                if (prevCheckVpnFailCount >= failTh) {
                     notifyWebhook('vpn_connectivity_recovered', {
                         publicIp: monitoringData.publicIp,
                         method: ipResult.method,
@@ -2467,7 +2563,7 @@ async function checkVPN() {
                 failCount++;
                 const preview = (ipResult.preview || '').replace(/\s+/g, ' ').slice(0, 160);
                 console.log(
-                    `[Monitor] Connectivity check failed (${failCount}/${FAIL_THRESHOLD}) [${vpnTypeMon}]${preview ? ` — ${preview}` : ''}`,
+                    `[Monitor] Connectivity check failed (${failCount}/${failTh}) [${vpnTypeMon}]${preview ? ` — ${preview}` : ''}`,
                 );
             }
 
@@ -2508,7 +2604,7 @@ async function checkVPN() {
                         console.log(`[Monitor] Port Forwarding Active: ${port}`);
                     } else {
                         pfFailCount++;
-                        console.log(`[Monitor] Port Forwarding reported port 0 (${pfFailCount}/${FAIL_THRESHOLD})`);
+                        console.log(`[Monitor] Port Forwarding reported port 0 (${pfFailCount}/${failTh})`);
                     }
                 } else {
                     // Fallback: read forwarded port from status file inside container.
@@ -2542,7 +2638,7 @@ async function checkVPN() {
                         console.log('[Monitor] Port Forwarding check skipped (control server requires auth).');
                     } else {
                         pfFailCount++;
-                        console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${FAIL_THRESHOLD})`);
+                        console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${failTh})`);
                     }
                 }
             }
@@ -2556,13 +2652,13 @@ async function checkVPN() {
     lastMonitoringSnapshot = { ...monitoringData };
 
     // 3. Handle Failures
-    if (failCount >= FAIL_THRESHOLD || pfFailCount >= FAIL_THRESHOLD) {
+    if (failCount >= failTh || pfFailCount >= failTh) {
         console.log(`[Monitor] Persistent failure detected (Fail: ${failCount}, PF-Fail: ${pfFailCount}). Executing Auto-Failover...`);
-        if (failCount >= FAIL_THRESHOLD) {
-            notifyWebhook('vpn_connectivity_failed', { failCount, pfFailCount, threshold: FAIL_THRESHOLD });
+        if (failCount >= failTh) {
+            notifyWebhook('vpn_connectivity_failed', { failCount, pfFailCount, threshold: failTh });
         }
-        if (pfFailCount >= FAIL_THRESHOLD) {
-            notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: FAIL_THRESHOLD });
+        if (pfFailCount >= failTh) {
+            notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: failTh });
         }
         try {
             await executeFailoverRotation();
@@ -2571,29 +2667,40 @@ async function checkVPN() {
         } catch (err) {
             console.error('[Monitor] Failover failed:', err.message);
         }
-        return setTimeout(checkVPN, CHECK_INTERVAL);
+        return setTimeout(checkVPN, msFail);
     }
 
     prevCheckVpnFailCount = failCount;
     prevCheckVpnPfFailCount = pfFailCount;
 
     // 4. Schedule next check
-    const nextInterval = (failCount > 0 || pfFailCount > 0) ? CHECK_INTERVAL : HEALTHY_INTERVAL;
+    const nextInterval = (failCount > 0 || pfFailCount > 0) ? msFail : msHealthy;
     setTimeout(checkVPN, nextInterval);
 }
 
 app.get('/api/pia/monitoring', authenticateToken, (req, res) => {
-    // Collect the most recent monitoring state
+    const msFail = getMonitorIntervalFailingMs();
+    const msHealthy = getMonitorIntervalHealthyMs();
+    const failTh = getMonitorFailThreshold();
     res.json({
         failCount,
         pfFailCount,
+        failThreshold: failTh,
         lastForwardedPort,
         connected: lastMonitoringSnapshot?.connected ?? null,
         publicIp: lastMonitoringSnapshot?.publicIp ?? null,
         portForwarding: lastMonitoringSnapshot?.portForwarding ?? null,
         port: lastMonitoringSnapshot?.port ?? null,
         timestamp: lastMonitoringSnapshot?.timestamp ?? null,
-        checkInterval: (failCount > 0 || pfFailCount > 0) ? CHECK_INTERVAL : HEALTHY_INTERVAL
+        warmup: lastMonitoringSnapshot?.warmup ?? null,
+        vpnType: lastMonitoringSnapshot?.vpnType ?? null,
+        checkInterval: (failCount > 0 || pfFailCount > 0) ? msFail : msHealthy,
+        checkIntervalHealthyMs: msHealthy,
+        checkIntervalFailingMs: msFail,
+        warmupWireguardMs: getMonitorWarmupWireguardMs(),
+        warmupOpenvpnMs: getMonitorWarmupOpenvpnMs(),
+        autostartDelayMs: getAutostartDelayMs(),
+        autostartEnabled: isAutostartGluetunEnabled(),
     });
 });
 
@@ -2761,5 +2868,5 @@ app.listen(PORT, () => {
     // and run the same outbound connectivity probe used by "Save & connect".
     setTimeout(() => {
         maybeAutostartGluetunOnStartup().catch((e) => console.error('[Startup] Autostart crashed:', e.message));
-    }, 2500);
+    }, getAutostartDelayMs());
 });

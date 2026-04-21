@@ -8,6 +8,18 @@ where version tags exist.
 
 ## [Unreleased]
 
+### Added
+
+- **Settings subtabs** on every main tab: **VPN & tunnel** (Basics / Connection), **DNS** (Resolvers / Filtering & blocklists), **Firewall & ports** (Firewall / Port forwarding), **Local proxies** (Shadowsocks / HTTP), **Gluetun advanced** (Logging, Health check, Server updater, System & identity, VPN hooks). Shared **`SettingsSubTabBar`** component (same pattern as **This app**).
+- **This app → Monitoring:** configurable VPN health loop — `GUI_MONITOR_INTERVAL_MS_HEALTHY`, `GUI_MONITOR_INTERVAL_MS_FAILING`, `GUI_MONITOR_FAIL_THRESHOLD`, `GUI_MONITOR_WARMUP_WIREGUARD_MS`, `GUI_MONITOR_WARMUP_OPENVPN_MS`; **`GUI_AUTOSTART_DELAY_MS`**; toggle for **`GUI_AUTOSTART_GLUETUN`** persisted in `gui-config.env` (Docker env when unset); live snapshot panel; webhooks moved under Monitoring; Network page chart prefs grouped there.
+- **`GET /api/pia/monitoring`** returns effective intervals, fail threshold, warmup hints, autostart delay, and autostart enabled flag for the UI.
+
+### Changed
+
+- **Startup autostart:** reads **`GUI_AUTOSTART_GLUETUN`** from `gui-config.env` when set (falls back to container env); merges **`gluetun.env`** with **`gui-config.env`** for “complete profile” detection; broader WireGuard heuristics; skip reasons logged when autostart does not run.
+- **PIA monitor widgets** on VPN tab use dynamic **`failThreshold`** from the API instead of a hardcoded “/3”.
+- Dashboard links to Settings pass **`settingsAppSub: 'dashboard'`** so the correct **This app** subtab opens.
+
 ## [0.4.2] — 2026-04-20
 
 ### Added

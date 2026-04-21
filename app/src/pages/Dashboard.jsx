@@ -482,7 +482,7 @@ export default function Dashboard() {
                   className="dropdown-item"
                   onClick={() => {
                     setMenuOpen(false);
-                    navigate('/settings', { state: { settingsTab: 'application', scrollTo: 'dashboard-widgets' } });
+                    navigate('/settings', { state: { settingsTab: 'application', settingsAppSub: 'dashboard', scrollTo: 'dashboard-widgets' } });
                   }}
                 >
                   <span className="material-icons-round" style={{ fontSize: '18px' }}>tune</span>
@@ -514,7 +514,7 @@ export default function Dashboard() {
       {visibleOrderedIds.length === 0 ? (
         <div className="glass-panel" style={{ padding: '32px', textAlign: 'center' }}>
           <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>All dashboard widgets are hidden.</p>
-          <Link to="/settings" state={{ settingsTab: 'application', scrollTo: 'dashboard-widgets' }} className="btn btn-primary" style={{ textDecoration: 'none', display: 'inline-flex' }}>
+          <Link to="/settings" state={{ settingsTab: 'application', settingsAppSub: 'dashboard', scrollTo: 'dashboard-widgets' }} className="btn btn-primary" style={{ textDecoration: 'none', display: 'inline-flex' }}>
             Configure in Settings
           </Link>
         </div>
