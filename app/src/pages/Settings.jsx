@@ -149,6 +149,8 @@ export default function Settings() {
             lastForwardedPort: data?.lastForwardedPort ?? null,
             checkInterval: Number.isFinite(Number(data?.checkInterval)) ? Number(data.checkInterval) : 60 * 1000,
             failThreshold: Number.isFinite(Number(data?.failThreshold)) ? Number(data.failThreshold) : 3,
+            failThresholdConnectivity: Number.isFinite(Number(data?.failThresholdConnectivity)) ? Number(data.failThresholdConnectivity) : null,
+            failThresholdPortForwarding: Number.isFinite(Number(data?.failThresholdPortForwarding)) ? Number(data.failThresholdPortForwarding) : null,
             checkIntervalHealthyMs: Number.isFinite(Number(data?.checkIntervalHealthyMs)) ? Number(data.checkIntervalHealthyMs) : null,
             checkIntervalFailingMs: Number.isFinite(Number(data?.checkIntervalFailingMs)) ? Number(data.checkIntervalFailingMs) : null,
             autostartDelayMs: Number.isFinite(Number(data?.autostartDelayMs)) ? Number(data.autostartDelayMs) : null,
@@ -310,6 +312,8 @@ export default function Settings() {
             lastForwardedPort: data?.lastForwardedPort ?? null,
             checkInterval: Number.isFinite(Number(data?.checkInterval)) ? Number(data.checkInterval) : 30 * 1000,
             failThreshold: Number.isFinite(Number(data?.failThreshold)) ? Number(data.failThreshold) : 3,
+            failThresholdConnectivity: Number.isFinite(Number(data?.failThresholdConnectivity)) ? Number(data.failThresholdConnectivity) : null,
+            failThresholdPortForwarding: Number.isFinite(Number(data?.failThresholdPortForwarding)) ? Number(data.failThresholdPortForwarding) : null,
             checkIntervalHealthyMs: Number.isFinite(Number(data?.checkIntervalHealthyMs)) ? Number(data.checkIntervalHealthyMs) : null,
             checkIntervalFailingMs: Number.isFinite(Number(data?.checkIntervalFailingMs)) ? Number(data.checkIntervalFailingMs) : null,
             autostartDelayMs: Number.isFinite(Number(data?.autostartDelayMs)) ? Number(data.autostartDelayMs) : null,
@@ -326,6 +330,8 @@ export default function Settings() {
             lastForwardedPort: null,
             checkInterval: 30 * 1000,
             failThreshold: 3,
+            failThresholdConnectivity: null,
+            failThresholdPortForwarding: null,
           });
         });
     };
@@ -1102,7 +1108,10 @@ export default function Settings() {
                             <div style={{ flex: 1 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <strong style={{ fontSize: '14px', color: '#fff' }}>
-                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${piaMonitoring.failThreshold ?? 3})`}
+                                  {(() => {
+                                    const cTh = piaMonitoring.failThresholdConnectivity ?? piaMonitoring.failThreshold ?? 3;
+                                    return piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${cTh})`;
+                                  })()}
                                 </strong>
                                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                                   Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
@@ -1117,7 +1126,10 @@ export default function Settings() {
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
                                       <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
-                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{piaMonitoring.failThreshold ?? 3})...</span>
+                                      (() => {
+                                        const pTh = piaMonitoring.failThresholdPortForwarding ?? piaMonitoring.failThreshold ?? 3;
+                                        return <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{pTh})...</span>;
+                                      })()
                                     )}
                                   </span>
                                 </div>
@@ -1334,7 +1346,10 @@ export default function Settings() {
                             <div style={{ flex: 1 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <strong style={{ fontSize: '14px', color: '#fff' }}>
-                                  {piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${piaMonitoring.failThreshold ?? 3})`}
+                                  {(() => {
+                                    const cTh = piaMonitoring.failThresholdConnectivity ?? piaMonitoring.failThreshold ?? 3;
+                                    return piaMonitoring.failCount === 0 ? 'Connection Healthy' : `Connectivity Issues (${piaMonitoring.failCount}/${cTh})`;
+                                  })()}
                                 </strong>
                                 <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                                   Auto-refresh: {Math.round(piaMonitoring.checkInterval / 60000)}m
@@ -1349,7 +1364,10 @@ export default function Settings() {
                                     Port Forwarding: {piaMonitoring.pfFailCount === 0 ? (
                                       <strong style={{ color: 'var(--success)' }}>Active (Port {piaMonitoring.port || piaMonitoring.lastForwardedPort || 'Pending'})</strong>
                                     ) : (
-                                      <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{piaMonitoring.failThreshold ?? 3})...</span>
+                                      (() => {
+                                        const pTh = piaMonitoring.failThresholdPortForwarding ?? piaMonitoring.failThreshold ?? 3;
+                                        return <span style={{ color: 'var(--warning)' }}>Retrying ({piaMonitoring.pfFailCount}/{pTh})...</span>;
+                                      })()
                                     )}
                                   </span>
                                 </div>
@@ -2416,12 +2434,18 @@ export default function Settings() {
               {piaMonitoring && (
                 <div className="glass-panel" style={{ padding: '14px 16px', borderRadius: '12px', marginBottom: '16px', border: '1px solid var(--glass-border)' }}>
                   <div style={{ fontSize: '13px', fontWeight: 600, marginBottom: '8px' }}>Live snapshot</div>
+                  {(() => {
+                    const cTh = piaMonitoring.failThresholdConnectivity ?? piaMonitoring.failThreshold ?? 3;
+                    const pTh = piaMonitoring.failThresholdPortForwarding ?? piaMonitoring.failThreshold ?? 3;
+                    return (
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '10px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                    <div>Connectivity failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.failCount}</strong> / {piaMonitoring.failThreshold ?? 3}</div>
-                    <div>PF failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.pfFailCount}</strong> / {piaMonitoring.failThreshold ?? 3}</div>
+                    <div>Connectivity failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.failCount}</strong> / {cTh}</div>
+                    <div>PF failures: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.pfFailCount}</strong> / {pTh}</div>
                     <div>Next poll: <strong style={{ color: 'var(--text-primary)' }}>{Math.round((piaMonitoring.checkInterval || 60000) / 1000)}s</strong></div>
                     <div>Autostart: <strong style={{ color: 'var(--text-primary)' }}>{piaMonitoring.autostartEnabled === false ? 'off' : 'on'}</strong></div>
                   </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -2474,8 +2498,15 @@ export default function Settings() {
                     <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>Default 60000 (1 min). Used while failures are accumulating or during warm-up skips.</p>
                   </div>
                   <div className="form-group" style={{ margin: 0 }}>
-                    <label>Failures before auto-failover</label>
-                    <input type="number" name="GUI_MONITOR_FAIL_THRESHOLD" min={1} max={20} step={1} value={config.GUI_MONITOR_FAIL_THRESHOLD ?? ''} onChange={handleChange} className="text-input" placeholder="3" />
+                    <label>Connectivity failures before auto-failover</label>
+                    <input type="number" name="GUI_MONITOR_FAIL_THRESHOLD_CONNECTIVITY" min={1} max={20} step={1} value={config.GUI_MONITOR_FAIL_THRESHOLD_CONNECTIVITY ?? config.GUI_MONITOR_FAIL_THRESHOLD ?? ''} onChange={handleChange} className="text-input" placeholder="3" />
+                    <p style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                      Backward compatible with <code style={{ fontSize: '10px', background: 'var(--code-bg)', padding: '2px 5px', borderRadius: '4px' }}>GUI_MONITOR_FAIL_THRESHOLD</code> (applies to both when the new keys are unset).
+                    </p>
+                  </div>
+                  <div className="form-group" style={{ margin: 0 }}>
+                    <label>Port-forward failures before auto-failover</label>
+                    <input type="number" name="GUI_MONITOR_FAIL_THRESHOLD_PORT_FORWARDING" min={1} max={20} step={1} value={config.GUI_MONITOR_FAIL_THRESHOLD_PORT_FORWARDING ?? config.GUI_MONITOR_FAIL_THRESHOLD ?? ''} onChange={handleChange} className="text-input" placeholder="3" />
                   </div>
                   <div className="form-group" style={{ margin: 0 }}>
                     <label>Warm-up WireGuard (ms)</label>

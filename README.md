@@ -4,6 +4,10 @@ A web UI for [**Gluetun**](https://github.com/qdm12/gluetun): change VPN setting
 
 [![Docker Pulls](https://img.shields.io/docker/pulls/raddadengineer/gluetun-gui)](https://hub.docker.com/r/raddadengineer/gluetun-gui)
 
+## Screenshots
+
+![Dashboard](docs/screenshots/dashboard.png)
+
 ## Setup (Docker)
 
 1. **Install** [Docker](https://docs.docker.com/get-docker/) with Compose on the machine that will run the VPN stack.

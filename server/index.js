@@ -942,6 +942,8 @@ async function applyGuiConfiguration(config) {
         'GUI_MONITOR_INTERVAL_MS_HEALTHY',
         'GUI_MONITOR_INTERVAL_MS_FAILING',
         'GUI_MONITOR_FAIL_THRESHOLD',
+        'GUI_MONITOR_FAIL_THRESHOLD_CONNECTIVITY',
+        'GUI_MONITOR_FAIL_THRESHOLD_PORT_FORWARDING',
         'GUI_MONITOR_WARMUP_WIREGUARD_MS',
         'GUI_MONITOR_WARMUP_OPENVPN_MS',
     ];
@@ -1022,11 +1024,17 @@ async function applyGuiConfiguration(config) {
             if (k.startsWith('OPENVPN_')) delete gluetunEnv[k];
         });
 
-        if (gluetunEnv.PIA_PORT_FORWARDING === 'on' || gluetunEnv.VPN_PORT_FORWARDING === 'on') {
+        // Only inject the PIA-specific port forwarding credentials/provider when the GUI is configured for PIA.
+        // For other providers (ProtonVPN / Perfect Privacy / PrivateVPN), Gluetun implements VPN_PORT_FORWARDING natively
+        // and setting VPN_PORT_FORWARDING_PROVIDER to PIA breaks it.
+        if (isPia && (gluetunEnv.PIA_PORT_FORWARDING === 'on' || gluetunEnv.VPN_PORT_FORWARDING === 'on')) {
             const apiUser = config.PIA_USERNAME || config.OPENVPN_USER;
             const apiPass = config.PIA_PASSWORD || config.OPENVPN_PASSWORD;
             if (apiUser && apiPass) {
-                gluetunEnv.VPN_PORT_FORWARDING_PROVIDER = 'private internet access';
+                // Respect an explicit override if the user set it.
+                if (!gluetunEnv.VPN_PORT_FORWARDING_PROVIDER) {
+                    gluetunEnv.VPN_PORT_FORWARDING_PROVIDER = 'private internet access';
+                }
                 gluetunEnv.VPN_PORT_FORWARDING_USERNAME = apiUser;
                 gluetunEnv.VPN_PORT_FORWARDING_PASSWORD = apiPass;
             }
@@ -1882,6 +1890,17 @@ function getMonitorFailThreshold() {
     return getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD', 3, 1, 20);
 }
 
+function getMonitorConnectivityFailThreshold() {
+    // Backward compatible: GUI_MONITOR_FAIL_THRESHOLD applies to both if the new key is unset.
+    const legacy = getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD', 3, 1, 20);
+    return getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD_CONNECTIVITY', legacy, 1, 20);
+}
+
+function getMonitorPortForwardFailThreshold() {
+    const legacy = getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD', 3, 1, 20);
+    return getGuiSettingInt('GUI_MONITOR_FAIL_THRESHOLD_PORT_FORWARDING', legacy, 1, 20);
+}
+
 function getMonitorIntervalHealthyMs() {
     return getGuiSettingInt('GUI_MONITOR_INTERVAL_MS_HEALTHY', 15 * 60 * 1000, 30_000, 24 * 60 * 60 * 1000);
 }
@@ -1926,7 +1945,8 @@ async function applyPiaWireguardFromCredentials({
     PIA_REGIONS,
     PIA_REGION_INDEX = '0',
 }) {
-    const pfFlag = PIA_PORT_FORWARDING === 'true' || PIA_PORT_FORWARDING === 'on' ? ' -p' : '';
+    const pfOn = PIA_PORT_FORWARDING === 'true' || PIA_PORT_FORWARDING === 'on';
+    const pfFlag = pfOn ? ' -p' : '';
     const safeRegion = PIA_REGION.replace(/[^a-zA-Z0-9_-]/g, '');
     const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
     const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
@@ -1993,6 +2013,13 @@ async function applyPiaWireguardFromCredentials({
         WIREGUARD_ENDPOINT_PORT: endpointPort,
         WIREGUARD_PUBLIC_KEY: publicKey,
     };
+    if (pfOn) {
+        // Enable Gluetun's native PIA port forwarding integration (requires username/password).
+        parsedVars.VPN_PORT_FORWARDING = 'on';
+        parsedVars.VPN_PORT_FORWARDING_PROVIDER = 'private internet access';
+        parsedVars.VPN_PORT_FORWARDING_USERNAME = PIA_USERNAME;
+        parsedVars.VPN_PORT_FORWARDING_PASSWORD = PIA_PASSWORD;
+    }
 
     const gluetunEnvFile = Object.entries(parsedVars)
         .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
@@ -2017,6 +2044,8 @@ async function applyPiaWireguardFromCredentials({
     envVars.PIA_REGIONS = PIA_REGIONS;
     envVars.PIA_REGION_INDEX = PIA_REGION_INDEX;
     envVars.PIA_PORT_FORWARDING = PIA_PORT_FORWARDING || 'false';
+    // Mirror PF in generic Gluetun var so the monitor + other tooling sees it.
+    if (pfOn) envVars.VPN_PORT_FORWARDING = 'on';
     envVars.VPN_SERVICE_PROVIDER = 'private internet access';
     envVars.VPN_TYPE = 'wireguard';
     if (serverName) envVars.SERVER_NAMES = serverName;
@@ -2036,6 +2065,12 @@ async function applyPiaWireguardFromCredentials({
         `WIREGUARD_ENDPOINT_PORT=${endpointPort}`,
         `WIREGUARD_PUBLIC_KEY=${publicKey}`,
     ];
+    if (pfOn) {
+        newEnvArray.push('VPN_PORT_FORWARDING=on');
+        newEnvArray.push('VPN_PORT_FORWARDING_PROVIDER=private internet access');
+        newEnvArray.push(`VPN_PORT_FORWARDING_USERNAME=${PIA_USERNAME}`);
+        newEnvArray.push(`VPN_PORT_FORWARDING_PASSWORD=${PIA_PASSWORD}`);
+    }
     if (serverName) {
         newEnvArray.push(`SERVER_NAMES=${serverName}`);
         console.log(`[PIA-WG] Syncing SERVER_NAMES=${serverName} for port forwarding support.`);
@@ -2498,7 +2533,8 @@ async function executeFailoverRotation() {
 }
 
 async function checkVPN() {
-    const failTh = getMonitorFailThreshold();
+    const connFailTh = getMonitorConnectivityFailThreshold();
+    const pfFailTh = getMonitorPortForwardFailThreshold();
     const msFail = getMonitorIntervalFailingMs();
     const msHealthy = getMonitorIntervalHealthyMs();
 
@@ -2551,7 +2587,7 @@ async function checkVPN() {
             if (ipResult.ok) {
                 monitoringData.publicIp = ipResult.publicIp || 'unknown';
                 monitoringData.connected = true;
-                if (prevCheckVpnFailCount >= failTh) {
+                if (prevCheckVpnFailCount >= connFailTh) {
                     notifyWebhook('vpn_connectivity_recovered', {
                         publicIp: monitoringData.publicIp,
                         method: ipResult.method,
@@ -2563,7 +2599,7 @@ async function checkVPN() {
                 failCount++;
                 const preview = (ipResult.preview || '').replace(/\s+/g, ' ').slice(0, 160);
                 console.log(
-                    `[Monitor] Connectivity check failed (${failCount}/${failTh}) [${vpnTypeMon}]${preview ? ` — ${preview}` : ''}`,
+                    `[Monitor] Connectivity check failed (${failCount}/${connFailTh}) [${vpnTypeMon}]${preview ? ` — ${preview}` : ''}`,
                 );
             }
 
@@ -2583,54 +2619,57 @@ async function checkVPN() {
             const vpnPfEnabled = String(envVars.VPN_PORT_FORWARDING || '').toLowerCase() === 'on' || String(envVars.VPN_PORT_FORWARDING || '').toLowerCase() === 'true';
             const pfEnabled = piaPfEnabled || vpnPfEnabled;
             if (pfEnabled && monitoringData.connected) {
-                const getPortCmd = `wget -qO- --timeout=5 http://127.0.0.1:8000/v1/portforward`;
-                const portExec = await container.exec({ Cmd: ['sh', '-c', getPortCmd], AttachStdout: true, AttachStderr: true });
-                const portStream = await portExec.start();
-
-                const portOutput = await collectExecOutput(portStream);
-
-                if (portOutput.includes('"port"')) {
-                    const match = portOutput.match(/"port":([0-9]+)/);
-                    const port = match ? parseInt(match[1], 10) : 0;
-                    if (port > 0) {
-                        monitoringData.port = port;
-                        monitoringData.portForwarding = true;
-                        pfFailCount = 0;
-                        
-                        if (lastForwardedPort && lastForwardedPort !== port) {
-                            console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${port}`);
-                        }
-                        lastForwardedPort = port;
-                        console.log(`[Monitor] Port Forwarding Active: ${port}`);
-                    } else {
-                        pfFailCount++;
-                        console.log(`[Monitor] Port Forwarding reported port 0 (${pfFailCount}/${failTh})`);
-                    }
-                } else {
-                    // Fallback: read forwarded port from status file inside container.
-                    // Gluetun commonly writes it to /tmp/gluetun/forwarded_port (see VPN_PORT_FORWARDING_STATUS_FILE).
-                    const statusFile = '/tmp/gluetun/forwarded_port';
-                    const fileCmd = `sh -lc 'test -f ${statusFile} && cat ${statusFile} || true'`;
+                // Prefer the status file first (works even when the control server is auth-protected).
+                // Default path mirrors Gluetun: /tmp/gluetun/forwarded_port (override via VPN_PORT_FORWARDING_STATUS_FILE).
+                const statusFile = String(envVars.VPN_PORT_FORWARDING_STATUS_FILE || '/tmp/gluetun/forwarded_port').trim() || '/tmp/gluetun/forwarded_port';
+                let filePort = 0;
+                try {
+                    const fileCmd = `sh -lc 'test -f ${JSON.stringify(statusFile)} && cat ${JSON.stringify(statusFile)} || true'`;
                     const fileExec = await container.exec({ Cmd: ['sh', '-c', fileCmd], AttachStdout: true, AttachStderr: true });
                     const fileStream = await fileExec.start();
                     const fileOut = (await collectExecOutput(fileStream)).trim();
-                    const filePort = fileOut.match(/([0-9]{2,6})/) ? parseInt(fileOut.match(/([0-9]{2,6})/)[1], 10) : 0;
+                    filePort = fileOut.match(/([0-9]{2,6})/) ? parseInt(fileOut.match(/([0-9]{2,6})/)[1], 10) : 0;
+                } catch {
+                    filePort = 0;
+                }
 
-                    if (filePort > 0) {
-                        monitoringData.port = filePort;
-                        monitoringData.portForwarding = true;
-                        pfFailCount = 0;
-                        if (lastForwardedPort && lastForwardedPort !== filePort) {
-                            console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${filePort}`);
+                if (filePort > 0) {
+                    monitoringData.port = filePort;
+                    monitoringData.portForwarding = true;
+                    pfFailCount = 0;
+                    if (lastForwardedPort && lastForwardedPort !== filePort) {
+                        console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${filePort}`);
+                    }
+                    lastForwardedPort = filePort;
+                    console.log(`[Monitor] Port Forwarding Active (file): ${filePort}`);
+                } else {
+                    // Secondary: query control server (may be auth protected; treat auth as "skip", not failure).
+                    const getPortCmd = `wget -qO- --timeout=5 http://127.0.0.1:8000/v1/portforward`;
+                    const portExec = await container.exec({ Cmd: ['sh', '-c', getPortCmd], AttachStdout: true, AttachStderr: true });
+                    const portStream = await portExec.start();
+                    const portOutput = await collectExecOutput(portStream);
+
+                    if (portOutput.includes('"port"')) {
+                        const match = portOutput.match(/"port":([0-9]+)/);
+                        const port = match ? parseInt(match[1], 10) : 0;
+                        if (port > 0) {
+                            monitoringData.port = port;
+                            monitoringData.portForwarding = true;
+                            pfFailCount = 0;
+                            if (lastForwardedPort && lastForwardedPort !== port) {
+                                console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${port}`);
+                            }
+                            lastForwardedPort = port;
+                            console.log(`[Monitor] Port Forwarding Active: ${port}`);
+                        } else {
+                            pfFailCount++;
+                            console.log(`[Monitor] Port Forwarding reported port 0 (${pfFailCount}/${pfFailTh})`);
                         }
-                        lastForwardedPort = filePort;
-                        console.log(`[Monitor] Port Forwarding Active (file): ${filePort}`);
                     } else if (
-                        // If control server is auth-protected and file isn't available, don't count as failure.
-                        // Gluetun's control server often returns a small plain-text body on auth failures.
                         /Authentication Failed/i.test(portOutput) ||
                         /\bUnauthorized\b/i.test(portOutput) ||
                         /\bForbidden\b/i.test(portOutput) ||
+                        /\b401\b/.test(portOutput) ||
                         /requires auth/i.test(portOutput) ||
                         /authentication/i.test(portOutput)
                     ) {
@@ -2638,7 +2677,7 @@ async function checkVPN() {
                         console.log('[Monitor] Port Forwarding check skipped (control server requires auth).');
                     } else {
                         pfFailCount++;
-                        console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${failTh})`);
+                        console.log(`[Monitor] Port Forwarding check failed (${pfFailCount}/${pfFailTh})`);
                     }
                 }
             }
@@ -2652,13 +2691,13 @@ async function checkVPN() {
     lastMonitoringSnapshot = { ...monitoringData };
 
     // 3. Handle Failures
-    if (failCount >= failTh || pfFailCount >= failTh) {
+    if (failCount >= connFailTh || pfFailCount >= pfFailTh) {
         console.log(`[Monitor] Persistent failure detected (Fail: ${failCount}, PF-Fail: ${pfFailCount}). Executing Auto-Failover...`);
-        if (failCount >= failTh) {
-            notifyWebhook('vpn_connectivity_failed', { failCount, pfFailCount, threshold: failTh });
+        if (failCount >= connFailTh) {
+            notifyWebhook('vpn_connectivity_failed', { failCount, pfFailCount, threshold: connFailTh });
         }
-        if (pfFailCount >= failTh) {
-            notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: failTh });
+        if (pfFailCount >= pfFailTh) {
+            notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: pfFailTh });
         }
         try {
             await executeFailoverRotation();
@@ -2681,11 +2720,15 @@ async function checkVPN() {
 app.get('/api/pia/monitoring', authenticateToken, (req, res) => {
     const msFail = getMonitorIntervalFailingMs();
     const msHealthy = getMonitorIntervalHealthyMs();
-    const failTh = getMonitorFailThreshold();
+    const connFailTh = getMonitorConnectivityFailThreshold();
+    const pfFailTh = getMonitorPortForwardFailThreshold();
     res.json({
         failCount,
         pfFailCount,
-        failThreshold: failTh,
+        failThresholdConnectivity: connFailTh,
+        failThresholdPortForwarding: pfFailTh,
+        // Backward compatible alias for older UIs
+        failThreshold: connFailTh,
         lastForwardedPort,
         connected: lastMonitoringSnapshot?.connected ?? null,
         publicIp: lastMonitoringSnapshot?.publicIp ?? null,

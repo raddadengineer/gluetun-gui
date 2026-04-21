@@ -21,6 +21,7 @@ export default function Logs() {
   const pausedBufferRef = useRef([]);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
+  const logsPageRef = useRef(null);
   const logAlertRef = useRef({ lastAt: 0, lastSnippet: '' });
 
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
@@ -131,6 +132,24 @@ export default function Logs() {
       return next;
     });
   }, [isPaused, pausedCount]);
+
+  // Keep page scroll fixed while Logs is mounted; scroll should happen in the log window.
+  useEffect(() => {
+    const root = logsPageRef.current;
+    const main = root ? root.closest('.main-content') : null;
+    if (!main) return undefined;
+    const prevOverflowY = main.style.overflowY;
+    const prevOverflowX = main.style.overflowX;
+    const prevOverscroll = main.style.overscrollBehavior;
+    main.style.overflowY = 'hidden';
+    main.style.overflowX = 'hidden';
+    main.style.overscrollBehavior = 'contain';
+    return () => {
+      main.style.overflowY = prevOverflowY;
+      main.style.overflowX = prevOverflowX;
+      main.style.overscrollBehavior = prevOverscroll;
+    };
+  }, []);
 
   const toggleDebugging = async () => {
     setLoadingConfig(true);
@@ -298,7 +317,7 @@ export default function Logs() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, gap: '20px' }}>
+    <div ref={logsPageRef} className="logs-page" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, gap: '20px', overflow: 'hidden' }}>
       <header className="header" style={{ marginBottom: 0, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div className="header-title">
           <h2>System Logs</h2>
@@ -509,9 +528,11 @@ export default function Logs() {
         </div>
       </div>
 
-      <div className="glass-panel" style={{
-        flex: 1,
-        minHeight: 0,
+      <div className="glass-panel logs-terminal-panel" style={{
+        width: '100%',
+        height: '620px',
+        minHeight: '620px',
+        maxHeight: '620px',
         display: 'flex',
         flexDirection: 'column',
         background: 'var(--mono-bg)',
@@ -536,6 +557,7 @@ export default function Logs() {
           flex: 1,
           padding: '16px 0',
           overflowY: 'auto',
+          overscrollBehavior: 'contain',
           fontFamily: '"JetBrains Mono", "Fira Code", Consolas, monospace',
           fontSize: '13px',
           lineHeight: '1.6',

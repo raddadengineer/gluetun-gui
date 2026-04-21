@@ -588,6 +588,11 @@ body {
   z-index: 1;
 }
 
+/* Logs page: keep page fixed; scroll inside the log pane */
+.main-content:has(.logs-page) {
+  overflow-y: hidden;
+}
+
 .header {
   display: flex;
   justify-content: space-between;
@@ -1441,6 +1446,12 @@ input:checked+.slider:before {
 }
 
 @media (max-width: 600px) {
+  .logs-terminal-panel {
+    height: 420px !important;
+    min-height: 420px !important;
+    max-height: 420px !important;
+  }
+
   .dropdown-menu {
     right: 0 !important;
     left: auto !important;
