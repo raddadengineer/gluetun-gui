@@ -44,6 +44,131 @@ function SettingsSubTabBar({ tabs, active, onActive }) {
   );
 }
 
+/**
+ * Parse a standard WireGuard client `.conf` into Gluetun `WIREGUARD_*` GUI keys.
+ * Uses `[Interface]` and the first `[Peer]` that has `Endpoint`, otherwise the first peer.
+ */
+function parseWireguardConfToGluetunPatch(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  let section = '';
+  const iface = {};
+  const peers = [];
+  let curPeer = null;
+
+  for (const raw of lines) {
+    const line = raw.replace(/#.*/, '').trim();
+    if (!line) continue;
+    const sec = line.match(/^\[([^\]]+)\]\s*$/i);
+    if (sec) {
+      section = sec[1].trim().toLowerCase();
+      if (section === 'peer') {
+        curPeer = {};
+        peers.push(curPeer);
+      } else {
+        curPeer = null;
+      }
+      continue;
+    }
+    const eq = line.indexOf('=');
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (section === 'interface') iface[key] = val;
+    else if (section === 'peer' && curPeer) curPeer[key] = val;
+  }
+
+  const peer =
+    peers.find((p) => p.Endpoint && String(p.Endpoint).trim()) ||
+    peers[0];
+  if (!peer) return { ok: false, message: 'No [Peer] section found.' };
+
+  const priv = iface.PrivateKey;
+  if (!priv || !String(priv).trim()) return { ok: false, message: 'No PrivateKey in [Interface].' };
+
+  const pub = peer.PublicKey;
+  if (!pub || !String(pub).trim()) return { ok: false, message: 'No PublicKey in [Peer].' };
+
+  const patch = {
+    VPN_TYPE: 'wireguard',
+    WIREGUARD_PRIVATE_KEY: String(priv).trim(),
+    WIREGUARD_PUBLIC_KEY: String(pub).trim(),
+  };
+
+  if (peer.PresharedKey && String(peer.PresharedKey).trim()) {
+    patch.WIREGUARD_PRESHARED_KEY = String(peer.PresharedKey).trim();
+  }
+
+  const addrRaw = iface.Address;
+  if (addrRaw && String(addrRaw).trim()) {
+    const addrs = String(addrRaw)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const ipv4 = addrs.find((a) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(a));
+    const pick = ipv4 || addrs[0];
+    if (pick) {
+      if (!pick.includes('/') && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(pick)) {
+        patch.WIREGUARD_ADDRESSES = `${pick}/32`;
+      } else {
+        patch.WIREGUARD_ADDRESSES = pick;
+      }
+    }
+  }
+
+  if (peer.AllowedIPs && String(peer.AllowedIPs).trim()) {
+    patch.WIREGUARD_ALLOWED_IPS = String(peer.AllowedIPs).replace(/\s+/g, '');
+  }
+
+  const epRaw = peer.Endpoint;
+  if (epRaw && String(epRaw).trim()) {
+    const ep = String(epRaw).trim();
+    let host = '';
+    let port = '';
+    if (ep.startsWith('[')) {
+      const idx = ep.indexOf(']:');
+      if (idx !== -1) {
+        host = ep.slice(1, idx);
+        port = ep.slice(idx + 2);
+      } else {
+        host = ep.slice(1);
+      }
+    } else {
+      const lastColon = ep.lastIndexOf(':');
+      if (lastColon > 0) {
+        const after = ep.slice(lastColon + 1);
+        if (/^\d+$/.test(after) && after.length <= 5) {
+          host = ep.slice(0, lastColon);
+          port = after;
+        } else {
+          host = ep;
+        }
+      } else {
+        host = ep;
+      }
+    }
+    if (host) patch.WIREGUARD_ENDPOINT_IP = host;
+    if (port) patch.WIREGUARD_ENDPOINT_PORT = port;
+  }
+
+  const ka = peer.PersistentKeepalive;
+  if (ka != null && String(ka).trim()) {
+    const s = String(ka).trim();
+    if (/^\d+s$/i.test(s)) patch.WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL = s;
+    else {
+      const n = parseInt(s, 10);
+      patch.WIREGUARD_PERSISTENT_KEEPALIVE_INTERVAL = Number.isFinite(n) ? `${n}s` : s;
+    }
+  }
+
+  const mtu = iface.MTU;
+  if (mtu != null && String(mtu).trim()) {
+    const n = parseInt(String(mtu).trim(), 10);
+    if (Number.isFinite(n) && n > 0) patch.WIREGUARD_MTU = String(n);
+  }
+
+  return { ok: true, patch };
+}
+
 export default function Settings() {
   const location = useLocation();
   const { notify, prefs: notifyPrefs, setPrefs: setNotifyPrefs } = useNotifications();
@@ -76,6 +201,7 @@ export default function Settings() {
   const [guiPasswordNew, setGuiPasswordNew] = useState('');
   const [guiPasswordConfirm, setGuiPasswordConfirm] = useState('');
   const importEnvRef = useRef(null);
+  const wireguardConfImportRef = useRef(null);
   const [homelabBackups, setHomelabBackups] = useState([]);
   const [homelabBackupBusy, setHomelabBackupBusy] = useState(false);
   const [diffHistoryOpen, setDiffHistoryOpen] = useState(false);
@@ -96,6 +222,49 @@ export default function Settings() {
       // ignore
     }
   }, []);
+
+  const onWireguardConfFileChange = useCallback(
+    (e) => {
+      const input = e.target;
+      const f = input.files?.[0];
+      input.value = '';
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '');
+        const r = parseWireguardConfToGluetunPatch(text);
+        if (!r.ok) {
+          notify({
+            level: 'error',
+            title: 'WireGuard .conf',
+            message: r.message,
+            source: 'settings',
+            dedupeKey: 'wg_conf_import_fail',
+          });
+          return;
+        }
+        setConfig((c) => ({ ...c, ...r.patch }));
+        notify({
+          level: 'success',
+          title: 'WireGuard .conf',
+          message: 'Imported into the form. Review fields and Save to apply.',
+          source: 'settings',
+          dedupeKey: 'wg_conf_import_ok',
+        });
+      };
+      reader.onerror = () => {
+        notify({
+          level: 'error',
+          title: 'WireGuard .conf',
+          message: 'Could not read file.',
+          source: 'settings',
+          dedupeKey: 'wg_conf_read_fail',
+        });
+      };
+      reader.readAsText(f);
+    },
+    [notify]
+  );
 
   const refreshEngineStatus = useCallback(async () => {
     setEngineStatusLoading(true);
@@ -1606,6 +1775,40 @@ export default function Settings() {
                     <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>vpn_lock</span>
                     WireGuard configuration
                   </h3>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: '10px',
+                      marginBottom: '12px',
+                      padding: '10px 12px',
+                      borderRadius: '10px',
+                      border: '1px solid var(--glass-border)',
+                      background: 'rgba(255,255,255,0.03)',
+                    }}
+                  >
+                    <input
+                      ref={wireguardConfImportRef}
+                      type="file"
+                      accept=".conf,.txt,text/plain"
+                      style={{ display: 'none' }}
+                      onChange={onWireguardConfFileChange}
+                    />
+                    <button
+                      type="button"
+                      className="btn"
+                      style={{ padding: '6px 12px', fontSize: '13px' }}
+                      onClick={() => wireguardConfImportRef.current?.click()}
+                    >
+                      <span className="material-icons-round" style={{ fontSize: '16px', marginRight: '6px', verticalAlign: 'middle' }}>upload_file</span>
+                      Import WireGuard .conf
+                    </button>
+                    <span style={{ fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '560px', lineHeight: 1.45 }}>
+                      Fills fields from <strong style={{ fontWeight: 600 }}>[Interface]</strong> and <strong style={{ fontWeight: 600 }}>[Peer]</strong> (e.g. Privado or other providers that ship a standard client config). Choose your VPN service in Basics first, then Save.
+                    </span>
+                  </div>
 
                   <div className="form-group">
                     <label>Private Key</label>
