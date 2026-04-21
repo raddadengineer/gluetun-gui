@@ -55,6 +55,9 @@ export default function Settings() {
   const [diffHistoryOpen, setDiffHistoryOpen] = useState(false);
   const [diffHistoryEntries, setDiffHistoryEntries] = useState([]);
   const [diffHistoryLoading, setDiffHistoryLoading] = useState(false);
+  const [engineStatus, setEngineStatus] = useState(null);
+  const [engineStatusLoading, setEngineStatusLoading] = useState(false);
+  const [engineStatusErr, setEngineStatusErr] = useState(null);
 
   const refreshHomelabBackups = useCallback(async () => {
     try {
@@ -68,9 +71,36 @@ export default function Settings() {
     }
   }, []);
 
+  const refreshEngineStatus = useCallback(async () => {
+    setEngineStatusLoading(true);
+    setEngineStatusErr(null);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/status', { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`Failed to load engine status (${res.status})${text ? `: ${text}` : ''}`);
+      }
+      const data = await res.json();
+      setEngineStatus(data);
+    } catch (e) {
+      setEngineStatus(null);
+      setEngineStatusErr(e.message || 'Failed to load engine status');
+    } finally {
+      setEngineStatusLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     refreshHomelabBackups();
   }, [refreshHomelabBackups]);
+
+  useEffect(() => {
+    if (activeTab !== 'application') return undefined;
+    refreshEngineStatus();
+    const id = setInterval(refreshEngineStatus, 60000);
+    return () => clearInterval(id);
+  }, [activeTab, refreshEngineStatus]);
 
   useEffect(() => {
     const st = location.state;
@@ -2021,6 +2051,65 @@ export default function Settings() {
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
                 These options affect this web UI only (login, notification bell, toasts). They are not passed to the Gluetun container.
               </p>
+
+              <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginBottom: '16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
+                  <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>layers</span>
+                    Gluetun engine image
+                  </h3>
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={refreshEngineStatus}
+                    disabled={engineStatusLoading}
+                    style={{
+                      whiteSpace: 'nowrap',
+                      padding: '10px 14px',
+                      background: 'var(--surface-2)',
+                      border: '1px solid var(--glass-border)',
+                      color: 'var(--text-primary)',
+                      opacity: engineStatusLoading ? 0.7 : 1,
+                    }}
+                  >
+                    {engineStatusLoading ? 'Refreshing…' : 'Refresh'}
+                  </button>
+                </div>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: '0 0 10px 0', lineHeight: 1.5 }}>
+                  This is the running VPN container image as seen by Docker (not a GUI setting). It was moved out of the Dashboard status card to reduce clutter.
+                </p>
+                {engineStatusErr ? (
+                  <p style={{ fontSize: '12px', color: 'var(--danger)', margin: 0 }}>{engineStatusErr}</p>
+                ) : !engineStatus ? (
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
+                ) : (
+                  <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                    <div style={{ wordBreak: 'break-all', color: 'var(--text-primary)', fontWeight: 600 }}>
+                      {engineStatus.image || '—'}
+                    </div>
+                    {engineStatus.imageId && (
+                      <div style={{ marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
+                        {String(engineStatus.imageId).length > 48 ? `${String(engineStatus.imageId).slice(0, 48)}…` : engineStatus.imageId}
+                      </div>
+                    )}
+                    {engineStatus.containerName && (
+                      <div style={{ marginTop: '6px' }}>
+                        Container: <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{engineStatus.containerName}</strong>
+                      </div>
+                    )}
+                    {engineStatus.imageUpdate?.updateAvailable && (
+                      <div style={{ marginTop: '10px', color: 'var(--warning)', fontWeight: 600 }}>
+                        Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
+                      </div>
+                    )}
+                    {engineStatus.imageUpdate?.checkError && !engineStatus.imageUpdate?.updateAvailable && (
+                      <div style={{ marginTop: '8px', opacity: 0.85 }}>
+                        Image update check: {engineStatus.imageUpdate.checkError}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
 
               <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>palette</span>

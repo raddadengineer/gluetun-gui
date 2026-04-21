@@ -3,6 +3,9 @@ import { useEffect, useMemo, useState } from 'react';
 export default function About() {
   const [about, setAbout] = useState(null);
   const [aboutErr, setAboutErr] = useState(null);
+  const [engineStatus, setEngineStatus] = useState(null);
+  const [engineErr, setEngineErr] = useState(null);
+  const [engineLoading, setEngineLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -14,6 +17,39 @@ export default function About() {
         if (!cancelled) setAbout(data);
       } catch (e) {
         if (!cancelled) setAboutErr(e.message || 'Failed to load version info');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setEngineLoading(true);
+      setEngineErr(null);
+      try {
+        const token = localStorage.getItem('token');
+        const res = await fetch('/api/status', { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+        if (res.status === 401) {
+          if (!cancelled) {
+            setEngineStatus(null);
+            setEngineErr('Sign in to view the running Gluetun engine image details.');
+          }
+          return;
+        }
+        if (!res.ok) {
+          const text = await res.text().catch(() => '');
+          throw new Error(`Failed to load engine status (${res.status})${text ? `: ${text}` : ''}`);
+        }
+        const data = await res.json();
+        if (!cancelled) setEngineStatus(data);
+      } catch (e) {
+        if (!cancelled) {
+          setEngineStatus(null);
+          setEngineErr(e.message || 'Failed to load engine status');
+        }
+      } finally {
+        if (!cancelled) setEngineLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -80,6 +116,49 @@ export default function About() {
               <span>Built</span>
               <span>{about.build?.builtAt || '—'}</span>
             </div>
+          </div>
+        )}
+      </div>
+
+      <div className="glass-panel" style={{ padding: '28px 32px' }}>
+        <h3 style={{ fontSize: '17px', fontWeight: 600, margin: '0 0 12px 0', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>layers</span>
+          Gluetun engine image
+        </h3>
+        <p style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.65, margin: '0 0 12px 0' }}>
+          Running VPN container image as seen by Docker (digest hint is best-effort for Docker Hub tags).
+        </p>
+        {engineLoading ? (
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>Loading…</p>
+        ) : engineErr ? (
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>{engineErr}</p>
+        ) : !engineStatus ? (
+          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: 0 }}>—</p>
+        ) : (
+          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+            <div style={{ wordBreak: 'break-all', color: 'var(--text-primary)', fontWeight: 600 }}>
+              {engineStatus.image || '—'}
+            </div>
+            {engineStatus.imageId && (
+              <div style={{ marginTop: '8px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
+                {String(engineStatus.imageId).length > 48 ? `${String(engineStatus.imageId).slice(0, 48)}…` : engineStatus.imageId}
+              </div>
+            )}
+            {engineStatus.containerName && (
+              <div style={{ marginTop: '8px' }}>
+                Container: <strong style={{ fontWeight: 600, color: 'var(--text-primary)' }}>{engineStatus.containerName}</strong>
+              </div>
+            )}
+            {engineStatus.imageUpdate?.updateAvailable && (
+              <div style={{ marginTop: '10px', color: 'var(--warning)', fontWeight: 600 }}>
+                Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
+              </div>
+            )}
+            {engineStatus.imageUpdate?.checkError && !engineStatus.imageUpdate?.updateAvailable && (
+              <div style={{ marginTop: '8px', opacity: 0.85 }}>
+                Image update check: {engineStatus.imageUpdate.checkError}
+              </div>
+            )}
           </div>
         )}
       </div>

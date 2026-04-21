@@ -661,138 +661,6 @@ async function recreateGluetunContainer(newEnvObj) {
     return 'Gluetun container not found. Restart via docker-compose required.';
 }
 
-app.get('/api/config', authenticateToken, async (req, res) => {
-    try {
-        if (!fs.existsSync(ENV_PATH)) {
-            return res.json({});
-        }
-        const data = fs.readFileSync(ENV_PATH, 'utf8');
-        const config = {};
-        data.split('\n').forEach(line => {
-            if (line && line.includes('=')) {
-                const parts = line.split('=');
-                config[parts[0]] = parts.slice(1).join('=').trim();
-            }
-        });
-
-        let didPiaOpenVpnRegionMigrate = false;
-        const provL = String(config.VPN_SERVICE_PROVIDER || '').toLowerCase();
-        const isPiaOv =
-            provL.includes('private internet access') &&
-            String(config.VPN_TYPE || '').toLowerCase() === 'openvpn' &&
-            config.PIA_OPENVPN_REGIONS;
-        if (isPiaOv) {
-            try {
-                const aliasMap = await getPiaOpenVpnAliasToRegionMap();
-                const raw = config.PIA_OPENVPN_REGIONS.split(',').map((s) => s.trim()).filter(Boolean);
-                const seen = new Set();
-                const normalized = [];
-                for (const r of raw) {
-                    const canon = aliasMap.get(r.toLowerCase());
-                    if (canon && !seen.has(canon)) {
-                        seen.add(canon);
-                        normalized.push(canon);
-                    }
-                }
-                let joined = normalized.join(',');
-                if (joined && joined !== config.PIA_OPENVPN_REGIONS) {
-                    config.PIA_OPENVPN_REGIONS = joined;
-                    didPiaOpenVpnRegionMigrate = true;
-                    console.log('[Config] Migrated PIA OpenVPN selection to Gluetun region labels for GUI + .env');
-                }
-                if (isPiaOpenVpnPortForwardingEnabled(config) && config.PIA_OPENVPN_REGIONS) {
-                    const pfSet = await getPiaOpenVpnPfRegionSet();
-                    const tokens = config.PIA_OPENVPN_REGIONS.split(',').map((s) => s.trim()).filter(Boolean);
-                    const pfOk = tokens.filter((t) => pfSet.has(t));
-                    const pfJoined = pfOk.join(',');
-                    if (pfJoined && pfJoined !== config.PIA_OPENVPN_REGIONS) {
-                        config.PIA_OPENVPN_REGIONS = pfJoined;
-                        didPiaOpenVpnRegionMigrate = true;
-                        let idx = parseInt(config.PIA_REGION_INDEX || '0', 10);
-                        if (Number.isNaN(idx) || idx < 0 || idx >= pfOk.length) config.PIA_REGION_INDEX = '0';
-                        console.log('[Config] Dropped non-PF PIA OpenVPN regions (port forwarding on); persisted to .env');
-                    }
-                }
-            } catch (e) {
-                console.warn('[Config] PIA OpenVPN region migrate on GET skipped:', e.message);
-            }
-        }
-
-        // Migrate deprecated env var names to current Gluetun equivalents before sending to GUI
-        const deprecatedMap = {
-            'VPN_ENDPOINT_IP':    config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_IP'    : 'WIREGUARD_ENDPOINT_IP',
-            'VPN_ENDPOINT_PORT':  config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_PORT'  : 'WIREGUARD_ENDPOINT_PORT',
-            'DOT_PROVIDERS':      'DNS_UPSTREAM_RESOLVERS',
-            'DNS_ADDRESS':        'DNS_UPSTREAM_PLAIN_ADDRESSES',
-            'DOT_CACHING':        'DNS_CACHING',
-        };
-        let didMigrate = false;
-        Object.entries(deprecatedMap).forEach(([oldKey, newKey]) => {
-            if (config[oldKey]) {
-                if (!config[newKey]) config[newKey] = config[oldKey];
-                delete config[oldKey];
-                didMigrate = true;
-            }
-        });
-
-        // Ensure DNS_UPSTREAM_PLAIN_ADDRESSES has port suffix
-        if (config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
-            const fixed = config.DNS_UPSTREAM_PLAIN_ADDRESSES
-                .split(',')
-                .map(ip => ip.trim())
-                .filter(Boolean)
-                .map(ip => ip.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? `${ip}:53` : ip)
-                .join(',');
-            if (fixed !== config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
-                config.DNS_UPSTREAM_PLAIN_ADDRESSES = fixed;
-                didMigrate = true;
-            }
-        }
-
-        // Clean spaces and migrate deprecated mullvad DOT provider
-        if (config.DNS_UPSTREAM_RESOLVERS) {
-            const fixed = config.DNS_UPSTREAM_RESOLVERS
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean)
-                .map(s => s.toLowerCase() === 'mullvad' ? 'quad9' : s)
-                .filter((s, idx, arr) => arr.indexOf(s) === idx)
-                .join(',');
-            if (fixed !== config.DNS_UPSTREAM_RESOLVERS) {
-                config.DNS_UPSTREAM_RESOLVERS = fixed;
-                didMigrate = true;
-            }
-        }
-
-        // Gluetun parses UPDATER_PERIOD with Go duration syntax; bare "12" errors — treat bare numbers as hours
-        if (config.UPDATER_PERIOD !== undefined && config.UPDATER_PERIOD !== null && String(config.UPDATER_PERIOD).trim() !== '') {
-            const before = String(config.UPDATER_PERIOD).trim();
-            const after = normalizeGluetunUpdaterPeriod(config.UPDATER_PERIOD);
-            if (after !== before) {
-                config.UPDATER_PERIOD = after;
-                didMigrate = true;
-                console.log('[Config] Migrated UPDATER_PERIOD for Gluetun:', JSON.stringify(before), '→', after);
-            }
-        }
-
-        // Persist migrated values back to .env so Gluetun never sees stale/deprecated vars
-        if (didMigrate || didPiaOpenVpnRegionMigrate) {
-            let newEnv = '';
-            for (const [k, v] of Object.entries(config)) {
-                if (v !== undefined && v !== null && v.toString().trim() !== '') {
-                    newEnv += `${k}=${v}\n`;
-                }
-            }
-            fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
-            console.log('[Config] Migrated env vars and persisted to .env');
-        }
-
-        res.json(config);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
-
 /** Gluetun expects Go duration strings (e.g. 24h, 30m). Bare integers error at parse time. */
 function normalizeGluetunUpdaterPeriod(value) {
     if (value === undefined || value === null) return undefined;
@@ -803,6 +671,178 @@ function normalizeGluetunUpdaterPeriod(value) {
     if (/^-?\d+(\.\d+)?$/.test(s)) return `${s}h`;
     return s;
 }
+
+/**
+ * Apply the same migrations used by GET /api/config, persisting back to ENV_PATH when needed.
+ * Mutates `config` in place.
+ */
+async function migrateGuiEnvConfigInPlace(config) {
+    let didPiaOpenVpnRegionMigrate = false;
+
+    const provL = String(config.VPN_SERVICE_PROVIDER || '').toLowerCase();
+    const isPiaOv =
+        provL.includes('private internet access') &&
+        String(config.VPN_TYPE || '').toLowerCase() === 'openvpn' &&
+        config.PIA_OPENVPN_REGIONS;
+    if (isPiaOv) {
+        try {
+            const aliasMap = await getPiaOpenVpnAliasToRegionMap();
+            const raw = config.PIA_OPENVPN_REGIONS.split(',').map((s) => s.trim()).filter(Boolean);
+            const seen = new Set();
+            const normalized = [];
+            for (const r of raw) {
+                const canon = aliasMap.get(r.toLowerCase());
+                if (canon && !seen.has(canon)) {
+                    seen.add(canon);
+                    normalized.push(canon);
+                }
+            }
+            const joined = normalized.join(',');
+            if (joined && joined !== config.PIA_OPENVPN_REGIONS) {
+                config.PIA_OPENVPN_REGIONS = joined;
+                didPiaOpenVpnRegionMigrate = true;
+                console.log('[Config] Migrated PIA OpenVPN selection to Gluetun region labels for GUI + .env');
+            }
+            if (isPiaOpenVpnPortForwardingEnabled(config) && config.PIA_OPENVPN_REGIONS) {
+                const pfSet = await getPiaOpenVpnPfRegionSet();
+                const tokens = config.PIA_OPENVPN_REGIONS.split(',').map((s) => s.trim()).filter(Boolean);
+                const pfOk = tokens.filter((t) => pfSet.has(t));
+                const pfJoined = pfOk.join(',');
+                if (pfJoined && pfJoined !== config.PIA_OPENVPN_REGIONS) {
+                    config.PIA_OPENVPN_REGIONS = pfJoined;
+                    didPiaOpenVpnRegionMigrate = true;
+                    const idx = parseInt(config.PIA_REGION_INDEX || '0', 10);
+                    if (Number.isNaN(idx) || idx < 0 || idx >= pfOk.length) config.PIA_REGION_INDEX = '0';
+                    console.log('[Config] Dropped non-PF PIA OpenVPN regions (port forwarding on); persisted to .env');
+                }
+            }
+        } catch (e) {
+            console.warn('[Config] PIA OpenVPN region migrate skipped:', e.message);
+        }
+    }
+
+    // Migrate deprecated env var names to current Gluetun equivalents before sending to GUI
+    const deprecatedMap = {
+        VPN_ENDPOINT_IP: config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_IP' : 'WIREGUARD_ENDPOINT_IP',
+        VPN_ENDPOINT_PORT: config.VPN_TYPE === 'openvpn' ? 'OPENVPN_ENDPOINT_PORT' : 'WIREGUARD_ENDPOINT_PORT',
+        DOT_PROVIDERS: 'DNS_UPSTREAM_RESOLVERS',
+        DNS_ADDRESS: 'DNS_UPSTREAM_PLAIN_ADDRESSES',
+        DOT_CACHING: 'DNS_CACHING',
+    };
+    let didMigrate = false;
+    Object.entries(deprecatedMap).forEach(([oldKey, newKey]) => {
+        if (config[oldKey]) {
+            if (!config[newKey]) config[newKey] = config[oldKey];
+            delete config[oldKey];
+            didMigrate = true;
+        }
+    });
+
+    // Ensure DNS_UPSTREAM_PLAIN_ADDRESSES has port suffix
+    if (config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
+        const fixed = config.DNS_UPSTREAM_PLAIN_ADDRESSES
+            .split(',')
+            .map((ip) => ip.trim())
+            .filter(Boolean)
+            .map((ip) => (ip.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? `${ip}:53` : ip))
+            .join(',');
+        if (fixed !== config.DNS_UPSTREAM_PLAIN_ADDRESSES) {
+            config.DNS_UPSTREAM_PLAIN_ADDRESSES = fixed;
+            didMigrate = true;
+        }
+    }
+
+    // Clean spaces and migrate deprecated mullvad DOT provider
+    if (config.DNS_UPSTREAM_RESOLVERS) {
+        const fixed = config.DNS_UPSTREAM_RESOLVERS
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .map((s) => (s.toLowerCase() === 'mullvad' ? 'quad9' : s))
+            .filter((s, idx, arr) => arr.indexOf(s) === idx)
+            .join(',');
+        if (fixed !== config.DNS_UPSTREAM_RESOLVERS) {
+            config.DNS_UPSTREAM_RESOLVERS = fixed;
+            didMigrate = true;
+        }
+    }
+
+    // Gluetun parses UPDATER_PERIOD with Go duration syntax; bare "12" errors — treat bare numbers as hours
+    if (config.UPDATER_PERIOD !== undefined && config.UPDATER_PERIOD !== null && String(config.UPDATER_PERIOD).trim() !== '') {
+        const before = String(config.UPDATER_PERIOD).trim();
+        const after = normalizeGluetunUpdaterPeriod(config.UPDATER_PERIOD);
+        if (after !== before) {
+            config.UPDATER_PERIOD = after;
+            didMigrate = true;
+            console.log('[Config] Migrated UPDATER_PERIOD for Gluetun:', JSON.stringify(before), '→', after);
+        }
+    }
+
+    // Persist migrated values back to .env so Gluetun never sees stale/deprecated vars
+    if (didMigrate || didPiaOpenVpnRegionMigrate) {
+        let newEnv = '';
+        for (const [k, v] of Object.entries(config)) {
+            if (v !== undefined && v !== null && v.toString().trim() !== '') {
+                newEnv += `${k}=${v}\n`;
+            }
+        }
+        fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
+        console.log('[Config] Migrated env vars and persisted to .env');
+    }
+}
+
+function readGuiEnvConfigMapFromDisk() {
+    if (!fs.existsSync(ENV_PATH)) return {};
+    const data = fs.readFileSync(ENV_PATH, 'utf8');
+    const config = {};
+    data.split('\n').forEach((line) => {
+        if (line && line.includes('=')) {
+            const parts = line.split('=');
+            config[parts[0]] = parts.slice(1).join('=').trim();
+        }
+    });
+    return config;
+}
+
+function isAutostartGluetunEnabled() {
+    const v = String(process.env.GUI_AUTOSTART_GLUETUN || 'on').trim().toLowerCase();
+    return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
+function looksLikeSavedVpnSettings(config) {
+    const c = config || {};
+    const hasProvider = !!String(c.VPN_SERVICE_PROVIDER || '').trim();
+    const hasVpnType = !!String(c.VPN_TYPE || '').trim();
+    const hasOpenVpnCreds = !!String(c.OPENVPN_USER || '').trim() && !!String(c.OPENVPN_PASSWORD || '').trim();
+    const hasPiaCreds = !!String(c.PIA_USERNAME || '').trim() && !!String(c.PIA_PASSWORD || '').trim();
+    const hasWgMaterial =
+        !!String(c.WIREGUARD_PRIVATE_KEY || '').trim() &&
+        (!!String(c.WIREGUARD_ADDRESSES || '').trim() ||
+            (!!String(c.WIREGUARD_ENDPOINT_IP || '').trim() && !!String(c.WIREGUARD_ENDPOINT_PORT || '').trim()));
+    return (hasProvider && hasVpnType && (hasOpenVpnCreds || hasPiaCreds || hasWgMaterial));
+}
+
+async function engineContainerRunningState() {
+    const containers = await docker.listContainers({ all: true });
+    const g = findGluetunEngineContainer(containers);
+    if (!g) return { exists: false, running: false, status: null, id: null };
+    const inspectData = await docker.getContainer(g.Id).inspect();
+    const status = inspectData?.State?.Status || null;
+    return { exists: true, running: status === 'running', status, id: g.Id };
+}
+
+app.get('/api/config', authenticateToken, async (req, res) => {
+    try {
+        if (!fs.existsSync(ENV_PATH)) {
+            return res.json({});
+        }
+        const config = readGuiEnvConfigMapFromDisk();
+        await migrateGuiEnvConfigInPlace(config);
+        res.json(config);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 /** Persist GUI .env and recreate Gluetun (same pipeline as POST /api/config). */
 async function applyGuiConfiguration(config) {
@@ -2186,6 +2226,94 @@ async function probeOutboundVpn(container) {
     }
 }
 
+async function runOutboundConnectivityProbePersist() {
+    const persist = (payload) => {
+        saveVpnConnectivityState({
+            ...payload,
+            at: new Date().toISOString(),
+        });
+    };
+    try {
+        const containers = await docker.listContainers({ all: true });
+        const g = findGluetunEngineContainer(containers);
+        if (!g) {
+            persist({ ok: false, error: 'Gluetun engine container not found', publicIp: null, method: null, detail: null });
+            return { ok: false, error: 'Gluetun engine container not found' };
+        }
+        const container = docker.getContainer(g.Id);
+        const inspectData = await container.inspect();
+        if (inspectData.State.Status !== 'running') {
+            const errMsg = `Container not running (${inspectData.State.Status})`;
+            persist({
+                ok: false,
+                error: errMsg,
+                publicIp: null,
+                method: 'inspect',
+                detail: inspectData.State.Status,
+            });
+            return { ok: false, error: errMsg, containerStatus: inspectData.State.Status };
+        }
+        const result = await probeOutboundVpn(container);
+        const out = result.ok ? { ok: true, ...result } : { ok: false, ...result };
+        persist({
+            ok: !!out.ok,
+            publicIp: out.publicIp || null,
+            method: out.method || null,
+            detail: out.detail || out.error || null,
+            error: out.ok ? null : out.error || out.detail || null,
+        });
+        return out;
+    } catch (err) {
+        persist({ ok: false, error: err.message, publicIp: null, method: null, detail: err.message });
+        return { ok: false, error: err.message };
+    }
+}
+
+async function maybeAutostartGluetunOnStartup() {
+    if (!isAutostartGluetunEnabled()) {
+        console.log('[Startup] GUI_AUTOSTART_GLUETUN disabled; skipping autostart.');
+        return;
+    }
+    if (!fs.existsSync(ENV_PATH)) {
+        return;
+    }
+
+    let engine;
+    try {
+        engine = await engineContainerRunningState();
+    } catch (e) {
+        console.warn('[Startup] Autostart skipped (Docker unavailable):', e.message);
+        return;
+    }
+
+    if (engine.running) {
+        return;
+    }
+
+    const config = readGuiEnvConfigMapFromDisk();
+    if (!looksLikeSavedVpnSettings(config)) {
+        return;
+    }
+
+    try {
+        console.log(
+            `[Startup] Gluetun not running (${engine.exists ? engine.status || 'unknown' : 'missing'}); applying saved GUI config (save + recreate)…`,
+        );
+        await migrateGuiEnvConfigInPlace(config);
+        const refreshed = readGuiEnvConfigMapFromDisk();
+        const out = await applyGuiConfiguration(refreshed);
+        console.log(`[Startup] Autostart apply complete: ${out.message}`);
+
+        const vpnType = String(refreshed.VPN_TYPE || 'wireguard').toLowerCase();
+        const delayMs = vpnType === 'openvpn' ? 8000 : 3500;
+        await new Promise((r) => setTimeout(r, delayMs));
+        const probe = await runOutboundConnectivityProbePersist();
+        console.log(`[Startup] Post-autostart connectivity probe: ${probe.ok ? 'OK' : 'FAIL'}${probe.publicIp ? ` (${probe.publicIp})` : ''}`);
+    } catch (e) {
+        console.error('[Startup] Autostart failed:', e.message);
+    }
+}
+
 async function restartGluetunContainerHelper() {
     const containers = await docker.listContainers({ all: true });
     const gluetun = findGluetunEngineContainer(containers);
@@ -2480,48 +2608,28 @@ app.post('/api/test-failover', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/vpn/connectivity-test', authenticateToken, async (req, res) => {
-    const persist = (payload) => {
-        saveVpnConnectivityState({
-            ...payload,
-            at: new Date().toISOString(),
-        });
-    };
     try {
-        const containers = await docker.listContainers({ all: true });
-        const g = findGluetunEngineContainer(containers);
-        if (!g) {
-            persist({ ok: false, error: 'Gluetun engine container not found', publicIp: null, method: null, detail: null });
-            return res.status(404).json({ ok: false, error: 'Gluetun engine container not found' });
+        const out = await runOutboundConnectivityProbePersist();
+        if (!out.ok && out.error === 'Gluetun engine container not found') {
+            return res.status(404).json({ ok: false, error: out.error });
         }
-        const container = docker.getContainer(g.Id);
-        const inspectData = await container.inspect();
-        if (inspectData.State.Status !== 'running') {
-            const body = {
+        if (!out.ok && out.containerStatus) {
+            return res.json({
                 ok: false,
-                error: `Container not running (${inspectData.State.Status})`,
-                containerStatus: inspectData.State.Status,
-            };
-            persist({
-                ok: false,
-                error: body.error,
-                publicIp: null,
-                method: 'inspect',
-                detail: inspectData.State.Status,
+                error: out.error,
+                containerStatus: out.containerStatus,
             });
-            return res.json(body);
         }
-        const result = await probeOutboundVpn(container);
-        const out = result.ok ? { ok: true, ...result } : { ok: false, ...result };
-        persist({
-            ok: !!out.ok,
-            publicIp: out.publicIp || null,
-            method: out.method || null,
-            detail: out.detail || out.error || null,
-            error: out.ok ? null : out.error || out.detail || null,
-        });
         res.json(out);
     } catch (err) {
-        persist({ ok: false, error: err.message, publicIp: null, method: null, detail: err.message });
+        saveVpnConnectivityState({
+            ok: false,
+            error: err.message,
+            publicIp: null,
+            method: null,
+            detail: err.message,
+            at: new Date().toISOString(),
+        });
         res.status(500).json({ ok: false, error: err.message });
     }
 });
@@ -2649,4 +2757,9 @@ app.listen(PORT, () => {
     } catch (e) {
         console.error('[Backup] Initial scheduled check failed:', e.message);
     }
+    // If Gluetun is down but we have a persisted GUI VPN config, auto-apply it (same pipeline as Save)
+    // and run the same outbound connectivity probe used by "Save & connect".
+    setTimeout(() => {
+        maybeAutostartGluetunOnStartup().catch((e) => console.error('[Startup] Autostart crashed:', e.message));
+    }, 2500);
 });

@@ -8,6 +8,21 @@ where version tags exist.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-04-20
+
+### Added
+
+- **Startup autostart:** if persisted `gui-config.env` looks like a full VPN profile and the Gluetun engine container is **not running**, the GUI server applies that config (same pipeline as **Save**) and runs the **Save & connect** outbound probe. Opt out with **`GUI_AUTOSTART_GLUETUN=off`** on the GUI container.
+
+### Changed
+
+- Moved Gluetun engine **image / digest / update hint** out of the Dashboard VPN status widget into **Settings → This app** and **About**.
+
+### Documentation
+
+- `docs/FEATURES.md` updated to reflect where engine image details are shown.
+- `docs/OPERATIONS.md`: document startup autostart and `GUI_AUTOSTART_GLUETUN`.
+
 ## [0.4.1] — 2026-04-20
 
 ### Added

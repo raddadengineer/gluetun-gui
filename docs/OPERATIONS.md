@@ -17,6 +17,7 @@ Browser :3000  →  JWT REST + SSE  →  gluetun-gui (Express)
 
 - **Single source of truth:** `DATA_DIR/gui-config.env` (or legacy `server/.env` if `DATA_DIR` unset).
 - **Apply:** Save or import writes that file, writes `gluetun.env` backup, **stops/removes/creates** the Gluetun container with merged environment (no separate `env_file` required for Gluetun).
+- **Startup autostart:** A few seconds after the GUI API starts, if **`gui-config.env`** looks like a complete VPN profile but the **Gluetun engine container is not running**, the server runs the same **apply** pipeline as **Save** (recreate/start Gluetun), waits briefly, then runs the same **outbound connectivity probe** as **Save & connect** and updates **`vpn-connectivity-state.json`**. Disable with **`GUI_AUTOSTART_GLUETUN=off`** (also `false`, `0`, `no`) on the **gluetun-gui** container.
 
 ## Persisted files (`DATA_DIR`)
 
@@ -26,7 +27,7 @@ Browser :3000  →  JWT REST + SSE  →  gluetun-gui (Express)
 | `gluetun.env` | Last env passed into Gluetun |
 | `sessions.json` | Session / bandwidth history |
 | `wireguard/` | PIA WireGuard material when applicable |
-| `vpn-connectivity-state.json` | Last manual **Test VPN connectivity** / Save & connect probe |
+| `vpn-connectivity-state.json` | Last **Test VPN connectivity** / Save & connect probe, or post-startup autostart probe |
 | `gui-homelab-state.json` | Operator timestamps (monitor, webhooks, backups, …) |
 | `config-diff-history.json` | Redacted env diffs after saves (cap `GUI_DIFF_HISTORY_MAX`, default 30) |
 | `backups/*.tar.gz` | Optional scheduled or manual archives |

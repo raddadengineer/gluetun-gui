@@ -44,33 +44,6 @@ export function ConnectionStatusWidget({ status, loading, piaMonitoring, isConne
           {status?.startedAt ? `Connected ${formatDistanceToNow(new Date(status.startedAt))} ago` : 'Uptime Unknown'}
         </p>
 
-        {status?.image && (
-          <p style={{ fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px', color: 'var(--text-secondary)', marginTop: '8px', lineHeight: 1.4 }}>
-            <span className="material-icons-round" style={{ fontSize: '14px', flexShrink: 0 }}>layers</span>
-            <span>
-              <span style={{ display: 'block', wordBreak: 'break-all' }}>{status.image}</span>
-              {status.imageId && (
-                <span style={{ fontSize: '10px', opacity: 0.85 }}>
-                  {String(status.imageId).length > 22 ? `${String(status.imageId).slice(0, 22)}…` : status.imageId}
-                </span>
-              )}
-              {status.containerName && (
-                <span style={{ fontSize: '10px', display: 'block', opacity: 0.85 }}>Container: {status.containerName}</span>
-              )}
-              {status.imageUpdate?.updateAvailable && (
-                <span style={{ fontSize: '11px', display: 'block', marginTop: '6px', color: 'var(--warning)', fontWeight: 600 }}>
-                  Newer image may exist on Docker Hub (digest differs from registry manifest for this tag).
-                </span>
-              )}
-              {status.imageUpdate?.checkError && !status.imageUpdate?.updateAvailable && (
-                <span style={{ fontSize: '10px', display: 'block', marginTop: '4px', opacity: 0.75 }}>
-                  Image update check: {status.imageUpdate.checkError}
-                </span>
-              )}
-            </span>
-          </p>
-        )}
-
         {status?.lastVpnConnectivityCheck?.at && (
           <div style={{
             marginTop: '10px',
