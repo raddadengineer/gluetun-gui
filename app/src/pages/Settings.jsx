@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useNotifications } from '../contexts/NotificationsContext';
 import ThemePicker from '../components/ThemePicker';
+import QbittorrentWidget from '../components/QbittorrentWidget';
+import SabnzbdWidget from '../components/SabnzbdWidget';
 import {
   appendDefaultLayoutItem,
   buildLayoutFromTemplate,
@@ -210,6 +212,182 @@ export default function Settings() {
   const [engineStatus, setEngineStatus] = useState(null);
   const [engineStatusLoading, setEngineStatusLoading] = useState(false);
   const [engineStatusErr, setEngineStatusErr] = useState(null);
+  const [qbitBusy, setQbitBusy] = useState(false);
+  const [qbitDetails, setQbitDetails] = useState(null);
+  const [sabBusy, setSabBusy] = useState(false);
+  const [sabDetails, setSabDetails] = useState(null);
+
+  const refreshQbittorrentDetails = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/details', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      setQbitDetails(data);
+    } catch {
+      setQbitDetails(null);
+    }
+  }, []);
+
+  const refreshSabnzbdDetails = useCallback(async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/sabnzbd/details', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      setSabDetails(data);
+    } catch {
+      setSabDetails(null);
+    }
+  }, []);
+
+  const testQbittorrentIntegration = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/status', { headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      if (!data?.configured) {
+        notify({ level: 'info', title: 'qBittorrent', message: 'Not configured yet. Set URL and credentials, then Save All Changes.', source: 'settings', dedupeKey: 'qbit_not_configured' });
+        return;
+      }
+      if (!data?.ok) throw new Error(data?.error || 'qBittorrent test failed');
+      notify({
+        level: 'success',
+        title: 'qBittorrent',
+        message: `Connected (v${data.version || 'unknown'}).`,
+        source: 'settings',
+        dedupeKey: 'qbit_ok',
+      });
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Test failed', source: 'settings', dedupeKey: 'qbit_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify]);
+
+  const bindQbittorrentToVpn = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/bind-vpn', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ net_interface: 'tun0', net_bind_ip: '' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      if (!data?.ok) throw new Error(data?.error || 'Failed to apply preferences');
+      notify({ level: 'success', title: 'qBittorrent', message: 'Applied: bind to tun0 (VPN interface).', source: 'settings', dedupeKey: 'qbit_bind_ok' });
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Bind failed', source: 'settings', dedupeKey: 'qbit_bind_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify]);
+
+  const pauseAllQbittorrentTorrents = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/torrents/pause-all', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({ level: 'success', title: 'qBittorrent', message: 'Paused all torrents.', source: 'settings', dedupeKey: 'qbit_pause_ok' });
+      refreshQbittorrentDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Pause failed', source: 'settings', dedupeKey: 'qbit_pause_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify, refreshQbittorrentDetails]);
+
+  const resumeAllQbittorrentTorrents = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/torrents/resume-all', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({ level: 'success', title: 'qBittorrent', message: 'Resumed all torrents.', source: 'settings', dedupeKey: 'qbit_resume_ok' });
+      refreshQbittorrentDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Resume failed', source: 'settings', dedupeKey: 'qbit_resume_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify, refreshQbittorrentDetails]);
+
+  const syncQbittorrentListeningPort = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/sync-port-forward', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({
+        level: 'success',
+        title: 'qBittorrent',
+        message: `Set qBittorrent listening port to forwarded port ${data.forwardedPort}.`,
+        source: 'settings',
+        dedupeKey: 'qbit_pf_ok',
+      });
+      refreshQbittorrentDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Sync failed', source: 'settings', dedupeKey: 'qbit_pf_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify, refreshQbittorrentDetails]);
+
+  const applyQbittorrentSafeDefaults = useCallback(async () => {
+    setQbitBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/qbittorrent/apply-safe-defaults', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({ level: 'success', title: 'qBittorrent', message: 'Applied safe defaults (anonymous mode, DHT/PEX/LSD off).', source: 'settings', dedupeKey: 'qbit_defaults_ok' });
+      refreshQbittorrentDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Apply failed', source: 'settings', dedupeKey: 'qbit_defaults_fail' });
+    } finally {
+      setQbitBusy(false);
+    }
+  }, [notify, refreshQbittorrentDetails]);
+
+  const pauseSabnzbd = useCallback(async () => {
+    setSabBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/sabnzbd/pause', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({ level: 'success', title: 'SABnzbd', message: 'Paused downloads.', source: 'settings', dedupeKey: 'sab_pause_ok' });
+      refreshSabnzbdDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'SABnzbd', message: e.message || 'Pause failed', source: 'settings', dedupeKey: 'sab_pause_fail' });
+    } finally {
+      setSabBusy(false);
+    }
+  }, [notify, refreshSabnzbdDetails]);
+
+  const resumeSabnzbd = useCallback(async () => {
+    setSabBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch('/api/integrations/sabnzbd/resume', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
+      notify({ level: 'success', title: 'SABnzbd', message: 'Resumed downloads.', source: 'settings', dedupeKey: 'sab_resume_ok' });
+      refreshSabnzbdDetails();
+    } catch (e) {
+      notify({ level: 'error', title: 'SABnzbd', message: e.message || 'Resume failed', source: 'settings', dedupeKey: 'sab_resume_fail' });
+    } finally {
+      setSabBusy(false);
+    }
+  }, [notify, refreshSabnzbdDetails]);
 
   const refreshHomelabBackups = useCallback(async () => {
     try {
@@ -293,6 +471,17 @@ export default function Settings() {
   useEffect(() => {
     if (activeTab === 'application' && appSubTab === 'data') refreshHomelabBackups();
   }, [activeTab, appSubTab, refreshHomelabBackups]);
+
+  useEffect(() => {
+    if (activeTab !== 'application' || appSubTab !== 'integrations') return undefined;
+    refreshQbittorrentDetails();
+    refreshSabnzbdDetails();
+    const id = setInterval(() => {
+      refreshQbittorrentDetails();
+      refreshSabnzbdDetails();
+    }, 10000);
+    return () => clearInterval(id);
+  }, [activeTab, appSubTab, refreshQbittorrentDetails, refreshSabnzbdDetails]);
 
   useEffect(() => {
     if (activeTab !== 'application' || appSubTab !== 'overview') return undefined;
@@ -1180,7 +1369,7 @@ export default function Settings() {
           {activeTab === 'general' && (
             <>
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 12px 0', lineHeight: 1.55 }}>
-                <strong style={{ fontWeight: 600 }}>Basics</strong> picks provider and protocol. <strong style={{ fontWeight: 600 }}>Connection</strong> holds PIA flows or generic server lists plus WireGuard/OpenVPN material.
+                <strong style={{ fontWeight: 600 }}>Basics</strong> sets provider and VPN type. <strong style={{ fontWeight: 600 }}>Connection</strong> is for every provider: credentials (when needed), server filters backed by Gluetun&apos;s server data, and WireGuard or OpenVPN fields. <strong style={{ fontWeight: 600 }}>Private Internet Access</strong> swaps in extra helpers (live region list, keys, port forwarding); others use the same fetch-and-filter flow and forms (e.g. Import WireGuard .conf when your provider gives a client file).
               </p>
               <SettingsSubTabBar
                 active={generalSubTab}
@@ -1201,7 +1390,7 @@ export default function Settings() {
                 Provider &amp; protocol
               </h3>
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0' }}>
-                Choose who you connect through and whether Gluetun uses WireGuard or OpenVPN. Provider-specific options are on the Connection subtab.
+                Choose who you connect through and whether Gluetun uses WireGuard or OpenVPN. Credentials, server selection, and protocol fields are on the Connection subtab for whichever provider you pick.
               </p>
               <div className="form-group">
                 <label>VPN Service Provider</label>
@@ -2413,6 +2602,7 @@ export default function Settings() {
                 tabs={[
                   { id: 'overview', label: 'Overview', icon: 'home' },
                   { id: 'monitoring', label: 'Monitoring', icon: 'sensors' },
+                  { id: 'integrations', label: 'Integrations', icon: 'extension' },
                   { id: 'appearance', label: 'Appearance', icon: 'palette' },
                   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard_customize' },
                   { id: 'security', label: 'Security', icon: 'admin_panel_settings' },
@@ -2459,7 +2649,7 @@ export default function Settings() {
                           {engineStatus.image || '—'}
                         </div>
                         {engineStatus.imageId && (
-                          <div style={{ marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace' }}>
+                          <div style={{ marginTop: '6px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace' }}>
                             {String(engineStatus.imageId).length > 48 ? `${String(engineStatus.imageId).slice(0, 48)}…` : engineStatus.imageId}
                           </div>
                         )}
@@ -2498,6 +2688,236 @@ export default function Settings() {
                       Applied immediately and saved in this browser (
                       <code>localStorage</code> key <code>gluetun_gui_theme_v1</code>).
                     </p>
+                  </div>
+                </>
+              )}
+
+              {appSubTab === 'integrations' && (
+                <>
+                  <h3 style={{ fontSize: '18px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>extension</span>
+                    Integrations
+                  </h3>
+                  <p style={{ fontSize: '13px', color: 'var(--text-secondary)', margin: '0 0 16px 0', lineHeight: 1.55 }}>
+                    Configure companion apps (like download clients) so the GUI can validate connectivity and apply safe defaults. For routing, keep using
+                    <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', marginLeft: '6px' }}>network_mode: service:gluetun</code>.
+                  </p>
+
+                  <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
+                      <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>download</span>
+                        qBittorrent WebUI
+                      </h4>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          Enabled
+                        </div>
+                        <label className="switch">
+                          <input
+                            type="checkbox"
+                            name="GUI_QBITTORRENT_ENABLED"
+                            checked={config.GUI_QBITTORRENT_ENABLED === 'on'}
+                            onChange={handleChange}
+                          />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {config.GUI_QBITTORRENT_ENABLED !== 'on' ? (
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                        Turn this on to configure qBittorrent. Disabled integrations don’t show settings and won’t run any automation.
+                      </p>
+                    ) : (
+                      <>
+                      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                        <button type="button" className="btn" disabled={qbitBusy} onClick={testQbittorrentIntegration} style={{ padding: '10px 14px' }}>
+                          {qbitBusy ? 'Working…' : 'Test connection'}
+                        </button>
+                        <button type="button" className="btn btn-primary" disabled={qbitBusy} onClick={bindQbittorrentToVpn} style={{ padding: '10px 14px' }}>
+                          Bind to VPN (tun0)
+                        </button>
+                        <button type="button" className="btn" disabled={qbitBusy} onClick={applyQbittorrentSafeDefaults} style={{ padding: '10px 14px' }}>
+                          Apply safe defaults
+                        </button>
+                        <button type="button" className="btn" disabled={qbitBusy} onClick={syncQbittorrentListeningPort} style={{ padding: '10px 14px' }}>
+                          Sync forwarded port
+                        </button>
+                        <button type="button" className="btn" disabled={qbitBusy} onClick={pauseAllQbittorrentTorrents} style={{ padding: '10px 14px' }}>
+                          Pause all
+                        </button>
+                        <button type="button" className="btn" disabled={qbitBusy} onClick={resumeAllQbittorrentTorrents} style={{ padding: '10px 14px' }}>
+                          Resume all
+                        </button>
+                      </div>
+
+                      <div style={{ margin: '10px 0 16px 0' }}>
+                        <QbittorrentWidget details={qbitDetails} />
+                      </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr 1fr', gap: '16px' }}>
+                      <div className="form-group">
+                        <label>WebUI URL</label>
+                        <input type="text" name="GUI_QBITTORRENT_URL" value={config.GUI_QBITTORRENT_URL || ''} onChange={handleChange} className="text-input" placeholder="e.g. http://qbittorrent:8080" />
+                        <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', lineHeight: 1.45 }}>
+                          Tip: if qBittorrent is behind Gluetun via <code>network_mode: service:gluetun</code>, publish the WebUI port on the Gluetun service.
+                        </p>
+                      </div>
+                      <div className="form-group">
+                        <label>Username</label>
+                        <input type="text" name="GUI_QBITTORRENT_USERNAME" value={config.GUI_QBITTORRENT_USERNAME || ''} onChange={handleChange} className="text-input" placeholder="admin" />
+                      </div>
+                      <div className="form-group">
+                        <label>Password</label>
+                        <input type="password" name="GUI_QBITTORRENT_PASSWORD" value={config.GUI_QBITTORRENT_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="WebUI password" />
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '15px' }}>Allow insecure HTTPS</strong>
+                        <span>Only if your WebUI uses self-signed TLS</span>
+                      </div>
+                      <label className="switch">
+                        <input type="checkbox" name="GUI_QBITTORRENT_INSECURE_TLS" checked={config.GUI_QBITTORRENT_INSECURE_TLS === 'on'} onChange={handleChange} />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+
+                    <div style={{ marginTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                      <div className="toggle-switch-container">
+                        <div className="toggle-info">
+                          <strong style={{ fontSize: '15px' }}>Auto-pause on VPN down</strong>
+                          <span>Pauses all torrents when VPN connectivity fails</span>
+                        </div>
+                        <label className="switch">
+                          <input type="checkbox" name="GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN" checked={config.GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN === 'on'} onChange={handleChange} />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+                      <div className="toggle-switch-container">
+                        <div className="toggle-info">
+                          <strong style={{ fontSize: '15px' }}>Auto-resume on VPN up</strong>
+                          <span>Optional: resumes all torrents after recovery</span>
+                        </div>
+                        <label className="switch">
+                          <input type="checkbox" name="GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP" checked={config.GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP === 'on'} onChange={handleChange} />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '15px' }}>Enable dashboard widget</strong>
+                        <span>Show qBittorrent on the Overview dashboard when enabled</span>
+                      </div>
+                      <label className="switch">
+                        <input type="checkbox" name="GUI_QBITTORRENT_DASHBOARD_WIDGET" checked={config.GUI_QBITTORRENT_DASHBOARD_WIDGET === 'on'} onChange={handleChange} />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px', marginTop: '16px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
+                      <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span className="material-icons-round" style={{ color: 'var(--accent-primary)' }}>download</span>
+                        SABnzbd
+                      </h4>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>Enabled</div>
+                        <label className="switch">
+                          <input
+                            type="checkbox"
+                            name="GUI_SABNZBD_ENABLED"
+                            checked={config.GUI_SABNZBD_ENABLED === 'on'}
+                            onChange={handleChange}
+                          />
+                          <span className="slider"></span>
+                        </label>
+                      </div>
+                    </div>
+
+                    {config.GUI_SABNZBD_ENABLED !== 'on' ? (
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', margin: 0, lineHeight: 1.45 }}>
+                        Turn this on to configure SABnzbd. Disabled integrations don’t show settings and won’t run any automation.
+                      </p>
+                    ) : (
+                      <>
+                        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                          <button type="button" className="btn" disabled={sabBusy} onClick={pauseSabnzbd} style={{ padding: '10px 14px' }}>
+                            Pause
+                          </button>
+                          <button type="button" className="btn btn-primary" disabled={sabBusy} onClick={resumeSabnzbd} style={{ padding: '10px 14px' }}>
+                            Resume
+                          </button>
+                        </div>
+
+                        <div style={{ margin: '10px 0 16px 0' }}>
+                          <SabnzbdWidget details={sabDetails} />
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 1fr', gap: '16px' }}>
+                          <div className="form-group">
+                            <label>URL</label>
+                            <input type="text" name="GUI_SABNZBD_URL" value={config.GUI_SABNZBD_URL || ''} onChange={handleChange} className="text-input" placeholder="e.g. http://sabnzbd:8080" />
+                          </div>
+                          <div className="form-group">
+                            <label>API Key</label>
+                            <input type="password" name="GUI_SABNZBD_API_KEY" value={config.GUI_SABNZBD_API_KEY || ''} onChange={handleChange} className="text-input" placeholder="SABnzbd API key" />
+                          </div>
+                        </div>
+
+                        <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                          <div className="toggle-info">
+                            <strong style={{ fontSize: '15px' }}>Allow insecure HTTPS</strong>
+                            <span>Only if your SABnzbd uses self-signed TLS</span>
+                          </div>
+                          <label className="switch">
+                            <input type="checkbox" name="GUI_SABNZBD_INSECURE_TLS" checked={config.GUI_SABNZBD_INSECURE_TLS === 'on'} onChange={handleChange} />
+                            <span className="slider"></span>
+                          </label>
+                        </div>
+
+                        <div style={{ marginTop: '12px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                          <div className="toggle-switch-container">
+                            <div className="toggle-info">
+                              <strong style={{ fontSize: '15px' }}>Auto-pause on VPN down</strong>
+                              <span>Pauses SABnzbd when VPN connectivity fails</span>
+                            </div>
+                            <label className="switch">
+                              <input type="checkbox" name="GUI_SABNZBD_AUTO_PAUSE_ON_VPN_DOWN" checked={config.GUI_SABNZBD_AUTO_PAUSE_ON_VPN_DOWN === 'on'} onChange={handleChange} />
+                              <span className="slider"></span>
+                            </label>
+                          </div>
+                          <div className="toggle-switch-container">
+                            <div className="toggle-info">
+                              <strong style={{ fontSize: '15px' }}>Auto-resume on VPN up</strong>
+                              <span>Optional: resumes after recovery</span>
+                            </div>
+                            <label className="switch">
+                              <input type="checkbox" name="GUI_SABNZBD_AUTO_RESUME_ON_VPN_UP" checked={config.GUI_SABNZBD_AUTO_RESUME_ON_VPN_UP === 'on'} onChange={handleChange} />
+                              <span className="slider"></span>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                          <div className="toggle-info">
+                            <strong style={{ fontSize: '15px' }}>Enable dashboard widget</strong>
+                            <span>Show SABnzbd on the Overview dashboard when enabled</span>
+                          </div>
+                          <label className="switch">
+                            <input type="checkbox" name="GUI_SABNZBD_DASHBOARD_WIDGET" checked={config.GUI_SABNZBD_DASHBOARD_WIDGET === 'on'} onChange={handleChange} />
+                            <span className="slider"></span>
+                          </label>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </>
               )}

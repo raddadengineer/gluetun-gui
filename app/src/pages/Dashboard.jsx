@@ -16,6 +16,8 @@ import {
   PiaMonitoringWidget,
   ProxyPortsWidget,
   DnsFirewallWidget,
+  QbittorrentDashboardWidget,
+  SabnzbdDashboardWidget,
 } from '../dashboard/DashboardPanels';
 
 const DashboardGridLayout = WidthProvider(ReactGridLayout);
@@ -372,14 +374,27 @@ export default function Dashboard() {
 
   const isConnected = status && status.status === 'running';
 
+  const qbitDashboardAllowed = useMemo(() => {
+    const gui = status?.gui || {};
+    return gui.GUI_QBITTORRENT_ENABLED === 'on' && gui.GUI_QBITTORRENT_DASHBOARD_WIDGET === 'on';
+  }, [status]);
+
+  const sabDashboardAllowed = useMemo(() => {
+    const gui = status?.gui || {};
+    return gui.GUI_SABNZBD_ENABLED === 'on' && gui.GUI_SABNZBD_DASHBOARD_WIDGET === 'on';
+  }, [status]);
+
   const onGridLayoutChange = useCallback((newLayout) => {
     setLayout(newLayout.map((it) => ({ ...it })));
   }, [setLayout]);
 
   const gridLayout = useMemo(() => {
-    const vis = new Set(visibleOrderedIds);
+    const filtered = visibleOrderedIds
+      .filter((id) => id !== 'qbittorrent' || qbitDashboardAllowed)
+      .filter((id) => id !== 'sabnzbd' || sabDashboardAllowed);
+    const vis = new Set(filtered);
     return layout.filter((l) => vis.has(l.i));
-  }, [layout, visibleOrderedIds]);
+  }, [layout, visibleOrderedIds, qbitDashboardAllowed, sabDashboardAllowed]);
 
   const renderWidget = useCallback((id) => {
     switch (id) {
@@ -401,6 +416,10 @@ export default function Dashboard() {
         return <ProxyPortsWidget status={status} />;
       case 'dnsFirewall':
         return <DnsFirewallWidget status={status} />;
+      case 'qbittorrent':
+        return <QbittorrentDashboardWidget addToast={addToast} />;
+      case 'sabnzbd':
+        return <SabnzbdDashboardWidget addToast={addToast} />;
       default:
         return null;
     }
@@ -511,7 +530,9 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {visibleOrderedIds.length === 0 ? (
+      {visibleOrderedIds
+        .filter((id) => id !== 'qbittorrent' || qbitDashboardAllowed)
+        .filter((id) => id !== 'sabnzbd' || sabDashboardAllowed).length === 0 ? (
         <div className="glass-panel" style={{ padding: '32px', textAlign: 'center' }}>
           <p style={{ color: 'var(--text-secondary)', marginBottom: '16px' }}>All dashboard widgets are hidden.</p>
           <Link to="/settings" state={{ settingsTab: 'application', settingsAppSub: 'dashboard', scrollTo: 'dashboard-widgets' }} className="btn btn-primary" style={{ textDecoration: 'none', display: 'inline-flex' }}>
@@ -534,7 +555,10 @@ export default function Dashboard() {
           isResizable={layoutEditMode}
           resizeHandles={['se', 'sw', 'ne', 'nw', 's', 'n', 'e', 'w']}
         >
-          {visibleOrderedIds.map((id) => (
+          {visibleOrderedIds
+            .filter((id) => id !== 'qbittorrent' || qbitDashboardAllowed)
+            .filter((id) => id !== 'sabnzbd' || sabDashboardAllowed)
+            .map((id) => (
             <div key={id}>
               <div className="dashboard-widget-shell">
                 {layoutEditMode && (

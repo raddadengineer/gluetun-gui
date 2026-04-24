@@ -8,17 +8,19 @@ where version tags exist.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-04-24
+
 ### Added
 
-- **Settings subtabs** on every main tab: **VPN & tunnel** (Basics / Connection), **DNS** (Resolvers / Filtering & blocklists), **Firewall & ports** (Firewall / Port forwarding), **Local proxies** (Shadowsocks / HTTP), **Gluetun advanced** (Logging, Health check, Server updater, System & identity, VPN hooks). Shared **`SettingsSubTabBar`** component (same pattern as **This app**).
-- **This app → Monitoring:** configurable VPN health loop — `GUI_MONITOR_INTERVAL_MS_HEALTHY`, `GUI_MONITOR_INTERVAL_MS_FAILING`, `GUI_MONITOR_FAIL_THRESHOLD`, `GUI_MONITOR_WARMUP_WIREGUARD_MS`, `GUI_MONITOR_WARMUP_OPENVPN_MS`; **`GUI_AUTOSTART_DELAY_MS`**; toggle for **`GUI_AUTOSTART_GLUETUN`** persisted in `gui-config.env` (Docker env when unset); live snapshot panel; webhooks moved under Monitoring; Network page chart prefs grouped there.
-- **`GET /api/pia/monitoring`** returns effective intervals, fail threshold, warmup hints, autostart delay, and autostart enabled flag for the UI.
+- **WireGuard `.conf` import** for non-PIA providers: import a standard WireGuard config file (e.g. Privado) and populate `WIREGUARD_*` fields directly in Settings.
+- **Integrations system (initial)** under **Settings → This app → Integrations** with per-integration enable toggles and optional dashboard widgets.
+- **qBittorrent integration**: connection test, live details, bind-to-VPN action, port-forward sync, pause/resume, “safe defaults”, optional auto-pause/resume on VPN transitions, and a dashboard widget with compact quick actions.
+- **SABnzbd integration**: live details (queue/speed), pause/resume, optional auto-pause/resume on VPN transitions, and a dashboard widget with compact quick actions.
+- **New dashboard widgets**: qBittorrent and SABnzbd (both gated by integration enabled + “Enable dashboard widget” toggle).
 
 ### Changed
 
-- **Startup autostart:** reads **`GUI_AUTOSTART_GLUETUN`** from `gui-config.env` when set (falls back to container env); merges **`gluetun.env`** with **`gui-config.env`** for “complete profile” detection; broader WireGuard heuristics; skip reasons logged when autostart does not run.
-- **PIA monitor widgets** on VPN tab use dynamic **`failThreshold`** from the API instead of a hardcoded “/3”.
-- Dashboard links to Settings pass **`settingsAppSub: 'dashboard'`** so the correct **This app** subtab opens.
+- **Dashboard widgets**: add optional qBittorrent and SABnzbd tiles (gated by integration settings) and reuse a single widget component for each integration’s UI + dashboard.
 
 ## [0.4.2] — 2026-04-20
 

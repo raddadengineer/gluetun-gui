@@ -9,6 +9,8 @@ export const DASHBOARD_WIDGET_CATALOG = [
   { id: 'throughputChart', label: 'Throughput chart', description: 'Recent tunnel throughput (KB/s) sparkline.' },
   { id: 'internalNetwork', label: 'Proxy & DNS toggles', description: 'Shadowsocks, HTTP proxy, adblock switches.' },
   { id: 'monitoring', label: 'PIA monitoring', description: 'Port forwarding and connectivity probe summary (when API returns data).' },
+  { id: 'qbittorrent', label: 'qBittorrent', description: 'Download client status, bind + forwarded port hints (when enabled in Integrations).' },
+  { id: 'sabnzbd', label: 'SABnzbd', description: 'Usenet client status, queue, and quick pause/resume (when enabled in Integrations).' },
   { id: 'proxyPorts', label: 'Service ports', description: 'Quick reference for SOCKS, HTTP proxy, and Gluetun control ports.' },
   { id: 'dnsFirewall', label: 'DNS & firewall', description: 'DNS, DoT, and firewall-related env fields when present in the status snapshot.' },
 ];
@@ -26,6 +28,8 @@ export const DEFAULT_RGL_LAYOUT = [
   { i: 'dnsFirewall', x: 8, y: 12, w: 4, h: 7, minW: 3, minH: 4 },
   { i: 'throughputChart', x: 0, y: 19, w: 12, h: 9, minW: 6, minH: 5 },
   { i: 'internalNetwork', x: 0, y: 28, w: 12, h: 10, minW: 4, minH: 6 },
+  { i: 'qbittorrent', x: 0, y: 38, w: 12, h: 7, minW: 4, minH: 5 },
+  { i: 'sabnzbd', x: 0, y: 45, w: 12, h: 7, minW: 4, minH: 5 },
 ];
 
 const META = Object.fromEntries(

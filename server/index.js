@@ -412,6 +412,10 @@ app.get('/api/status', authenticateToken, async (req, res) => {
                 VPN_SERVICE_PROVIDER: guiEnv.VPN_SERVICE_PROVIDER || null,
                 VPN_TYPE: guiEnv.VPN_TYPE || null,
                 PIA_PORT_FORWARDING: guiEnv.PIA_PORT_FORWARDING || null,
+                GUI_QBITTORRENT_ENABLED: guiEnv.GUI_QBITTORRENT_ENABLED || null,
+                GUI_QBITTORRENT_DASHBOARD_WIDGET: guiEnv.GUI_QBITTORRENT_DASHBOARD_WIDGET || null,
+                GUI_SABNZBD_ENABLED: guiEnv.GUI_SABNZBD_ENABLED || null,
+                GUI_SABNZBD_DASHBOARD_WIDGET: guiEnv.GUI_SABNZBD_DASHBOARD_WIDGET || null,
             },
             displayProvider,
             lastVpnConnectivityCheck,
@@ -946,6 +950,22 @@ async function applyGuiConfiguration(config) {
         'GUI_MONITOR_FAIL_THRESHOLD_PORT_FORWARDING',
         'GUI_MONITOR_WARMUP_WIREGUARD_MS',
         'GUI_MONITOR_WARMUP_OPENVPN_MS',
+        // Integrations (GUI-only)
+        'GUI_QBITTORRENT_ENABLED',
+        'GUI_QBITTORRENT_DASHBOARD_WIDGET',
+        'GUI_QBITTORRENT_URL',
+        'GUI_QBITTORRENT_USERNAME',
+        'GUI_QBITTORRENT_PASSWORD',
+        'GUI_QBITTORRENT_INSECURE_TLS',
+        'GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN',
+        'GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP',
+        'GUI_SABNZBD_ENABLED',
+        'GUI_SABNZBD_DASHBOARD_WIDGET',
+        'GUI_SABNZBD_URL',
+        'GUI_SABNZBD_API_KEY',
+        'GUI_SABNZBD_INSECURE_TLS',
+        'GUI_SABNZBD_AUTO_PAUSE_ON_VPN_DOWN',
+        'GUI_SABNZBD_AUTO_RESUME_ON_VPN_UP',
     ];
     const gluetunEnv = { ...config };
     guiOnlyKeys.forEach(k => delete gluetunEnv[k]);
@@ -1073,6 +1093,237 @@ async function applyGuiConfiguration(config) {
         containerDiff,
         guiChangeCount: guiChanges.length,
     };
+}
+
+function getGuiIntegrationConfig() {
+    const c = readGuiEnvConfigMapFromDisk();
+    return {
+        qbittorrent: {
+            enabled: String(c.GUI_QBITTORRENT_ENABLED || '').trim().toLowerCase() === 'on',
+            url: String(c.GUI_QBITTORRENT_URL || '').trim(),
+            username: String(c.GUI_QBITTORRENT_USERNAME || '').trim(),
+            password: String(c.GUI_QBITTORRENT_PASSWORD || '').trim(),
+            insecureTls: String(c.GUI_QBITTORRENT_INSECURE_TLS || '').trim().toLowerCase() === 'on',
+            autoPauseOnVpnDown: String(c.GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN || '').trim().toLowerCase() === 'on',
+            autoResumeOnVpnUp: String(c.GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP || '').trim().toLowerCase() === 'on',
+        },
+        sabnzbd: {
+            enabled: String(c.GUI_SABNZBD_ENABLED || '').trim().toLowerCase() === 'on',
+            url: String(c.GUI_SABNZBD_URL || '').trim(),
+            apiKey: String(c.GUI_SABNZBD_API_KEY || '').trim(),
+            insecureTls: String(c.GUI_SABNZBD_INSECURE_TLS || '').trim().toLowerCase() === 'on',
+            autoPauseOnVpnDown: String(c.GUI_SABNZBD_AUTO_PAUSE_ON_VPN_DOWN || '').trim().toLowerCase() === 'on',
+            autoResumeOnVpnUp: String(c.GUI_SABNZBD_AUTO_RESUME_ON_VPN_UP || '').trim().toLowerCase() === 'on',
+        },
+    };
+}
+
+async function qbittorrentLoginCookie({ baseUrl, username, password, insecureTls }) {
+    const u = String(baseUrl || '').replace(/\/+$/, '');
+    if (!u) throw new Error('qBittorrent URL is empty');
+    const loginUrl = `${u}/api/v2/auth/login`;
+    const body = new URLSearchParams();
+    body.set('username', username || '');
+    body.set('password', password || '');
+
+    const isHttps = loginUrl.startsWith('https://');
+    const agent = isHttps && insecureTls ? new https.Agent({ rejectUnauthorized: false }) : undefined;
+    const res = await fetch(loginUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        ...(agent ? { agent } : {}),
+    });
+    const txt = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(`qBittorrent login failed (${res.status})${txt ? `: ${txt}` : ''}`);
+    if (!String(txt || '').toLowerCase().includes('ok')) {
+        throw new Error(`qBittorrent login rejected${txt ? `: ${txt}` : ''}`);
+    }
+    const setCookie = res.headers.get('set-cookie') || '';
+    const m = setCookie.match(/SID=[^;]+/);
+    if (!m) throw new Error('qBittorrent did not return SID cookie (check WebUI auth settings).');
+    return { cookie: m[0], agent };
+}
+
+async function qbittorrentFetch({ baseUrl, path: p, method = 'GET', cookie, agent, form }) {
+    const u = String(baseUrl || '').replace(/\/+$/, '');
+    const url = `${u}${p.startsWith('/') ? p : `/${p}`}`;
+    const headers = {};
+    if (cookie) headers.cookie = cookie;
+    let body = undefined;
+    if (form) {
+        headers['Content-Type'] = 'application/x-www-form-urlencoded';
+        body = form;
+    }
+    const res = await fetch(url, { method, headers, body, ...(agent ? { agent } : {}) });
+    const text = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(`qBittorrent request failed (${res.status})${text ? `: ${text}` : ''}`);
+    return text;
+}
+
+async function qbittorrentPauseAll(q) {
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    const form = new URLSearchParams();
+    form.set('hashes', 'all');
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/pause', method: 'POST', cookie, agent, form });
+}
+
+async function qbittorrentResumeAll(q) {
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    const form = new URLSearchParams();
+    form.set('hashes', 'all');
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/resume', method: 'POST', cookie, agent, form });
+}
+
+async function qbittorrentApplySafeDefaults(q) {
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    // NOTE: We intentionally do NOT touch category save paths here (user requested).
+    const prefs = {
+        anonymous_mode: true,
+        dht: false,
+        pex: false,
+        lsd: false,
+        upnp: false,
+        natpmp: false,
+        random_port: false,
+        // Keep existing port unless user uses "Sync forwarded port".
+    };
+    const form = new URLSearchParams();
+    form.set('json', JSON.stringify(prefs));
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    return prefs;
+}
+
+let lastQbitAutoConnected = null;
+let lastQbitAutoActionAtMs = 0;
+async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
+    const { qbittorrent: q } = getGuiIntegrationConfig();
+    if (!q.enabled) {
+        lastQbitAutoConnected = connected;
+        return;
+    }
+    if (!q.url || !q.username || !q.password) {
+        lastQbitAutoConnected = connected;
+        return;
+    }
+    const now = Date.now();
+    // Debounce: avoid repeated actions during flapping.
+    if (now - lastQbitAutoActionAtMs < 5000) {
+        lastQbitAutoConnected = connected;
+        return;
+    }
+
+    const prev = lastQbitAutoConnected;
+    lastQbitAutoConnected = connected;
+    if (prev === null) return;
+    if (prev === connected) return;
+
+    try {
+        if (!connected && q.autoPauseOnVpnDown) {
+            await qbittorrentPauseAll(q);
+            lastQbitAutoActionAtMs = now;
+            console.log('[Integrations][qBittorrent] Auto-paused torrents (VPN down).');
+        }
+        if (connected && q.autoResumeOnVpnUp) {
+            await qbittorrentResumeAll(q);
+            lastQbitAutoActionAtMs = now;
+            console.log('[Integrations][qBittorrent] Auto-resumed torrents (VPN recovered).');
+        }
+    } catch (e) {
+        console.warn('[Integrations][qBittorrent] Auto-manage failed:', e.message);
+    }
+}
+
+function sabBuildApiUrl(baseUrl, apiKey, params) {
+    const u = String(baseUrl || '').replace(/\/+$/, '');
+    if (!u) throw new Error('SABnzbd URL is empty');
+    const p = new URLSearchParams({
+        output: 'json',
+        apikey: apiKey || '',
+        ...params,
+    });
+    return `${u}/api?${p.toString()}`;
+}
+
+async function sabFetchJson(s, params) {
+    const url = sabBuildApiUrl(s.url, s.apiKey, params);
+    const isHttps = url.startsWith('https://');
+    const agent = isHttps && s.insecureTls ? new https.Agent({ rejectUnauthorized: false }) : undefined;
+    const res = await fetch(url, { method: 'GET', ...(agent ? { agent } : {}) });
+    const text = await res.text().catch(() => '');
+    if (!res.ok) throw new Error(`SABnzbd request failed (${res.status})${text ? `: ${text}` : ''}`);
+    let json = null;
+    try {
+        json = JSON.parse(text);
+    } catch {
+        throw new Error('SABnzbd returned non-JSON response');
+    }
+    // SAB returns {status:false,error:"..."} on errors
+    if (json && json.status === false && (json.error || json.message)) {
+        throw new Error(String(json.error || json.message));
+    }
+    return json;
+}
+
+async function sabPause(s) {
+    await sabFetchJson(s, { mode: 'pause' });
+}
+
+async function sabResume(s) {
+    await sabFetchJson(s, { mode: 'resume' });
+}
+
+let lastSabAutoConnected = null;
+let lastSabAutoActionAtMs = 0;
+async function maybeAutoManageSabnzbdOnVpnTransition(connected) {
+    const { sabnzbd: s } = getGuiIntegrationConfig();
+    if (!s.enabled) {
+        lastSabAutoConnected = connected;
+        return;
+    }
+    if (!s.url || !s.apiKey) {
+        lastSabAutoConnected = connected;
+        return;
+    }
+    const now = Date.now();
+    if (now - lastSabAutoActionAtMs < 5000) {
+        lastSabAutoConnected = connected;
+        return;
+    }
+    const prev = lastSabAutoConnected;
+    lastSabAutoConnected = connected;
+    if (prev === null) return;
+    if (prev === connected) return;
+
+    try {
+        if (!connected && s.autoPauseOnVpnDown) {
+            await sabPause(s);
+            lastSabAutoActionAtMs = now;
+            console.log('[Integrations][SABnzbd] Auto-paused downloads (VPN down).');
+        }
+        if (connected && s.autoResumeOnVpnUp) {
+            await sabResume(s);
+            lastSabAutoActionAtMs = now;
+            console.log('[Integrations][SABnzbd] Auto-resumed downloads (VPN recovered).');
+        }
+    } catch (e) {
+        console.warn('[Integrations][SABnzbd] Auto-manage failed:', e.message);
+    }
 }
 
 function parseEnvImportText(raw) {
@@ -2587,6 +2838,10 @@ async function checkVPN() {
             if (ipResult.ok) {
                 monitoringData.publicIp = ipResult.publicIp || 'unknown';
                 monitoringData.connected = true;
+                if (prevCheckVpnFailCount >= connFailTh && lastMonitoringSnapshot?.connected === false) {
+                    maybeAutoManageQbittorrentOnVpnTransition(true);
+                    maybeAutoManageSabnzbdOnVpnTransition(true);
+                }
                 if (prevCheckVpnFailCount >= connFailTh) {
                     notifyWebhook('vpn_connectivity_recovered', {
                         publicIp: monitoringData.publicIp,
@@ -2601,6 +2856,10 @@ async function checkVPN() {
                 console.log(
                     `[Monitor] Connectivity check failed (${failCount}/${connFailTh}) [${vpnTypeMon}]${preview ? ` — ${preview}` : ''}`,
                 );
+                if (failCount >= connFailTh && lastMonitoringSnapshot?.connected === true) {
+                    maybeAutoManageQbittorrentOnVpnTransition(false);
+                    maybeAutoManageSabnzbdOnVpnTransition(false);
+                }
             }
 
             // 2. Check Port Forwarding if enabled
@@ -2850,6 +3109,281 @@ app.get('/api/compose-snippet', authenticateToken, async (req, res) => {
         res.send(`${snippet}\n`);
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── Integrations: qBittorrent ────────────────────────────────────────────────
+app.get('/api/integrations/qbittorrent/status', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.json({ enabled: false });
+        if (!q.url) return res.json({ enabled: true, configured: false });
+        if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
+
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+
+        const version = await qbittorrentFetch({
+            baseUrl: q.url,
+            path: '/api/v2/app/version',
+            cookie,
+            agent,
+        });
+
+        let transferInfo = null;
+        try {
+            const raw = await qbittorrentFetch({
+                baseUrl: q.url,
+                path: '/api/v2/transfer/info',
+                cookie,
+                agent,
+            });
+            transferInfo = JSON.parse(raw);
+        } catch {
+            transferInfo = null;
+        }
+
+        res.json({
+            enabled: true,
+            configured: true,
+            ok: true,
+            version: String(version || '').trim(),
+            transferInfo,
+        });
+    } catch (e) {
+        res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach qBittorrent.' });
+    }
+});
+
+app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
+        if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
+        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+
+        const netInterface = String(req.body?.net_interface || 'tun0');
+        const bindIp = String(req.body?.net_bind_ip || '');
+
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+
+        const prefs = { net_interface: netInterface, net_bind_ip: bindIp };
+        const form = new URLSearchParams();
+        form.set('json', JSON.stringify(prefs));
+
+        await qbittorrentFetch({
+            baseUrl: q.url,
+            path: '/api/v2/app/setPreferences',
+            method: 'POST',
+            cookie,
+            agent,
+            form,
+        });
+
+        res.json({ ok: true, applied: prefs });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to set qBittorrent preferences.' });
+    }
+});
+
+app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.json({ enabled: false });
+        if (!q.url) return res.json({ enabled: true, configured: false });
+        if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
+
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+
+        const [versionRaw, transferRaw, prefsRaw] = await Promise.all([
+            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/version', cookie, agent }),
+            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/transfer/info', cookie, agent }),
+            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent }),
+        ]);
+
+        let transferInfo = null;
+        let preferences = null;
+        try { transferInfo = JSON.parse(transferRaw); } catch { transferInfo = null; }
+        try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
+
+        res.json({
+            enabled: true,
+            configured: true,
+            ok: true,
+            version: String(versionRaw || '').trim(),
+            transferInfo,
+            preferences: preferences
+                ? {
+                      net_interface: preferences.net_interface ?? null,
+                      net_bind_ip: preferences.net_bind_ip ?? null,
+                      listen_port: preferences.listen_port ?? null,
+                  }
+                : null,
+            vpn: {
+                forwardedPort: Number.isFinite(Number(lastForwardedPort)) ? Number(lastForwardedPort) : null,
+            },
+        });
+    } catch (e) {
+        res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach qBittorrent.' });
+    }
+});
+
+app.post('/api/integrations/qbittorrent/torrents/pause-all', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
+        if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
+        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+        const form = new URLSearchParams();
+        form.set('hashes', 'all');
+        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/pause', method: 'POST', cookie, agent, form });
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to pause torrents.' });
+    }
+});
+
+app.post('/api/integrations/qbittorrent/torrents/resume-all', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
+        if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
+        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+        const form = new URLSearchParams();
+        form.set('hashes', 'all');
+        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/resume', method: 'POST', cookie, agent, form });
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to resume torrents.' });
+    }
+});
+
+app.post('/api/integrations/qbittorrent/sync-port-forward', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
+        if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
+        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        const port = Number(lastForwardedPort);
+        if (!Number.isFinite(port) || port <= 0) {
+            return res.status(400).json({ error: 'No forwarded port detected from the VPN monitor.' });
+        }
+
+        const { cookie, agent } = await qbittorrentLoginCookie({
+            baseUrl: q.url,
+            username: q.username,
+            password: q.password,
+            insecureTls: q.insecureTls,
+        });
+        const prefs = { listen_port: port };
+        const form = new URLSearchParams();
+        form.set('json', JSON.stringify(prefs));
+        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+        res.json({ ok: true, applied: prefs, forwardedPort: port });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to sync port.' });
+    }
+});
+
+app.post('/api/integrations/qbittorrent/apply-safe-defaults', authenticateToken, async (req, res) => {
+    try {
+        const { qbittorrent: q } = getGuiIntegrationConfig();
+        if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
+        if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
+        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        const applied = await qbittorrentApplySafeDefaults(q);
+        res.json({ ok: true, applied });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to apply safe defaults.' });
+    }
+});
+
+// ─── Integrations: SABnzbd ────────────────────────────────────────────────────
+app.get('/api/integrations/sabnzbd/details', authenticateToken, async (req, res) => {
+    try {
+        const { sabnzbd: s } = getGuiIntegrationConfig();
+        if (!s.enabled) return res.json({ enabled: false });
+        if (!s.url) return res.json({ enabled: true, configured: false });
+        if (!s.apiKey) return res.json({ enabled: true, configured: true, ok: false, error: 'Missing API key.' });
+
+        const [queue, server] = await Promise.all([
+            sabFetchJson(s, { mode: 'queue' }),
+            sabFetchJson(s, { mode: 'server_stats' }),
+        ]);
+
+        const q = queue?.queue || null;
+        const connected = q ? (q.status || q.state || null) : null;
+        const speed = q ? (q.kbpersec ?? q.speed ?? null) : null;
+        const slots = Array.isArray(q?.slots) ? q.slots : [];
+
+        res.json({
+            enabled: true,
+            configured: true,
+            ok: true,
+            version: server?.version || server?.data?.version || null,
+            queue: {
+                status: connected,
+                kbpersec: speed != null ? Number(speed) : null,
+                sizeLeft: q?.mbleft ?? q?.sizeleft ?? null,
+                timeLeft: q?.timeleft ?? null,
+                paused: q?.paused ?? null,
+                nzoCount: q?.noofslots != null ? Number(q.noofslots) : slots.length,
+            },
+        });
+    } catch (e) {
+        res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach SABnzbd.' });
+    }
+});
+
+app.post('/api/integrations/sabnzbd/pause', authenticateToken, async (req, res) => {
+    try {
+        const { sabnzbd: s } = getGuiIntegrationConfig();
+        if (!s.enabled) return res.status(400).json({ error: 'SABnzbd integration is disabled.' });
+        if (!s.url) return res.status(400).json({ error: 'SABnzbd URL is not set.' });
+        if (!s.apiKey) return res.status(400).json({ error: 'SABnzbd API key missing.' });
+        await sabPause(s);
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to pause SABnzbd.' });
+    }
+});
+
+app.post('/api/integrations/sabnzbd/resume', authenticateToken, async (req, res) => {
+    try {
+        const { sabnzbd: s } = getGuiIntegrationConfig();
+        if (!s.enabled) return res.status(400).json({ error: 'SABnzbd integration is disabled.' });
+        if (!s.url) return res.status(400).json({ error: 'SABnzbd URL is not set.' });
+        if (!s.apiKey) return res.status(400).json({ error: 'SABnzbd API key missing.' });
+        await sabResume(s);
+        res.json({ ok: true });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: e.message || 'Failed to resume SABnzbd.' });
     }
 });
 

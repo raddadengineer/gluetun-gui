@@ -1,5 +1,8 @@
 import { formatDistanceToNow, differenceInHours } from 'date-fns';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { useEffect, useState } from 'react';
+import QbittorrentWidget from '../components/QbittorrentWidget';
+import SabnzbdWidget from '../components/SabnzbdWidget';
 
 /** @param {{ status: any, loading: boolean, piaMonitoring: any, isConnected: boolean }} p */
 export function ConnectionStatusWidget({ status, loading, piaMonitoring, isConnected }) {
@@ -389,6 +392,223 @@ export function DnsFirewallWidget({ status }) {
       </div>
       <div className="status-info" style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
         {blocks}
+      </div>
+    </div>
+  );
+}
+
+/** @param {{ addToast?: (message: string, variant?: string, opts?: any) => void }} p */
+export function QbittorrentDashboardWidget({ addToast } = {}) {
+  const [details, setDetails] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const res = await fetch('/api/integrations/qbittorrent/details', { headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        setDetails(data);
+      } catch {
+        if (!cancelled) setDetails(null);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const run = async (path, body) => {
+    setBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(path, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      addToast?.('qBittorrent updated', 'success', { dedupeKey: `qbit-${path}` });
+    } catch (e) {
+      addToast?.(e.message || 'qBittorrent action failed', 'error', { dedupeKey: `qbit-${path}-err` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <QbittorrentWidget details={details} variant="panel" />
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          padding: '10px 12px',
+          borderRadius: '12px',
+          border: '1px solid var(--glass-border)',
+          background: 'rgba(255,255,255,0.03)',
+        }}
+      >
+        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span className="material-icons-round" style={{ fontSize: '16px', color: 'var(--accent-primary)' }}>bolt</span>
+          Quick actions
+        </div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="btn"
+            title="Pause all torrents"
+            aria-label="Pause all torrents"
+            disabled={busy}
+            onClick={() => run('/api/integrations/qbittorrent/torrents/pause-all')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>pause_circle</span>
+          </button>
+          <button
+            type="button"
+            className="btn"
+            title="Resume all torrents"
+            aria-label="Resume all torrents"
+            disabled={busy}
+            onClick={() => run('/api/integrations/qbittorrent/torrents/resume-all')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>play_circle</span>
+          </button>
+          <button
+            type="button"
+            className="btn"
+            title="Sync qBittorrent listen port to forwarded port"
+            aria-label="Sync forwarded port"
+            disabled={busy}
+            onClick={() => run('/api/integrations/qbittorrent/sync-port-forward')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>swap_horiz</span>
+          </button>
+          <button
+            type="button"
+            className="btn"
+            title="Bind qBittorrent to VPN interface (tun0)"
+            aria-label="Bind to VPN interface tun0"
+            disabled={busy}
+            onClick={() => run('/api/integrations/qbittorrent/bind-vpn', { net_interface: 'tun0', net_bind_ip: '' })}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>vpn_lock</span>
+          </button>
+          <button
+            type="button"
+            className="btn"
+            title="Apply safe defaults (anonymous mode, DHT/PEX/LSD off)"
+            aria-label="Apply safe defaults"
+            disabled={busy}
+            onClick={() => run('/api/integrations/qbittorrent/apply-safe-defaults')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>verified_user</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** @param {{ addToast?: (message: string, variant?: string, opts?: any) => void }} p */
+export function SabnzbdDashboardWidget({ addToast } = {}) {
+  const [details, setDetails] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        const res = await fetch('/api/integrations/sabnzbd/details', { headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
+        setDetails(data);
+      } catch {
+        if (!cancelled) setDetails(null);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 10000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  const run = async (path) => {
+    setBusy(true);
+    try {
+      const token = localStorage.getItem('token');
+      const res = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data?.ok === false) throw new Error(data?.error || `HTTP ${res.status}`);
+      addToast?.('SABnzbd updated', 'success', { dedupeKey: `sab-${path}` });
+    } catch (e) {
+      addToast?.(e.message || 'SABnzbd action failed', 'error', { dedupeKey: `sab-${path}-err` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <SabnzbdWidget details={details} variant="panel" />
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          padding: '10px 12px',
+          borderRadius: '12px',
+          border: '1px solid var(--glass-border)',
+          background: 'rgba(255,255,255,0.03)',
+        }}
+      >
+        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span className="material-icons-round" style={{ fontSize: '16px', color: 'var(--accent-primary)' }}>bolt</span>
+          Quick actions
+        </div>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <button
+            type="button"
+            className="btn"
+            title="Pause SABnzbd"
+            aria-label="Pause SABnzbd"
+            disabled={busy}
+            onClick={() => run('/api/integrations/sabnzbd/pause')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>pause_circle</span>
+          </button>
+          <button
+            type="button"
+            className="btn"
+            title="Resume SABnzbd"
+            aria-label="Resume SABnzbd"
+            disabled={busy}
+            onClick={() => run('/api/integrations/sabnzbd/resume')}
+            style={{ padding: '8px 10px', minWidth: 0 }}
+          >
+            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>play_circle</span>
+          </button>
+        </div>
       </div>
     </div>
   );
