@@ -2661,6 +2661,49 @@ export default function Settings() {
                     <code style={{ fontSize: '12px', background: 'var(--code-bg)', padding: '2px 6px', borderRadius: '4px', marginLeft: '6px' }}>network_mode: service:gluetun</code>.
                   </p>
 
+                  {engineStatus?.homelab?.startupAutoConnect && (
+                    <div
+                      style={{
+                        margin: '0 0 16px 0',
+                        padding: '12px 14px',
+                        borderRadius: '12px',
+                        border: '1px solid var(--glass-border)',
+                        background:
+                          engineStatus.homelab.startupAutoConnect.state === 'success'
+                            ? 'rgba(16, 185, 129, 0.08)'
+                            : engineStatus.homelab.startupAutoConnect.state === 'error'
+                              ? 'rgba(239, 68, 68, 0.08)'
+                              : 'rgba(245, 158, 11, 0.08)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px' }}>
+                        <div style={{ fontWeight: 700, fontSize: '13px', color: 'var(--text-primary)' }}>
+                          Startup auto-connect: {engineStatus.homelab.startupAutoConnect.state || '—'}
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          {engineStatus.homelab.startupAutoConnect.at || ''}
+                        </div>
+                      </div>
+                      {(engineStatus.homelab.startupAutoConnect.mode || engineStatus.homelab.startupAutoConnect.region) && (
+                        <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          {engineStatus.homelab.startupAutoConnect.mode ? `Mode: ${engineStatus.homelab.startupAutoConnect.mode}` : ''}
+                          {engineStatus.homelab.startupAutoConnect.region ? ` · Region: ${engineStatus.homelab.startupAutoConnect.region}` : ''}
+                        </div>
+                      )}
+                      {engineStatus.homelab.startupAutoConnect.error && (
+                        <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--danger)' }}>
+                          {engineStatus.homelab.startupAutoConnect.error}
+                        </div>
+                      )}
+                      {engineStatus.homelab.startupAutoConnect.postProbeOk !== undefined && engineStatus.homelab.startupAutoConnect.postProbeOk !== null && (
+                        <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                          Post-probe: {engineStatus.homelab.startupAutoConnect.postProbeOk ? 'OK' : 'FAIL'}
+                          {engineStatus.homelab.startupAutoConnect.postProbePublicIp ? ` (${engineStatus.homelab.startupAutoConnect.postProbePublicIp})` : ''}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="glass-panel" style={{ padding: '16px', borderRadius: '12px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', marginBottom: '10px' }}>
                       <h4 style={{ margin: 0, fontSize: '16px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -2758,6 +2801,17 @@ export default function Settings() {
                           <span className="slider"></span>
                         </label>
                       </div>
+                    </div>
+
+                    <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '15px' }}>Kill switch on VPN down</strong>
+                        <span>When VPN goes down, forces qBittorrent to bind to loopback (lo) until VPN recovers</span>
+                      </div>
+                      <label className="switch">
+                        <input type="checkbox" name="GUI_QBITTORRENT_KILL_SWITCH_ON_VPN_DOWN" checked={config.GUI_QBITTORRENT_KILL_SWITCH_ON_VPN_DOWN === 'on'} onChange={handleChange} />
+                        <span className="slider"></span>
+                      </label>
                     </div>
 
                     <div style={{ marginTop: '12px' }} className="toggle-switch-container">

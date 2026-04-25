@@ -1086,6 +1086,7 @@ async function applyGuiConfiguration(config) {
         'GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP',
         'GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD',
         'GUI_QBITTORRENT_AUTO_BIND_TUN0',
+        'GUI_QBITTORRENT_KILL_SWITCH_ON_VPN_DOWN',
         'GUI_SABNZBD_ENABLED',
         'GUI_SABNZBD_DASHBOARD_WIDGET',
         'GUI_SABNZBD_URL',
@@ -1235,6 +1236,7 @@ function getGuiIntegrationConfig() {
             autoResumeOnVpnUp: String(c.GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP || '').trim().toLowerCase() === 'on',
             autoSyncPortForward: String(c.GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD || '').trim().toLowerCase() === 'on',
             autoBindTun0: String(c.GUI_QBITTORRENT_AUTO_BIND_TUN0 || '').trim().toLowerCase() === 'on',
+            killSwitchOnVpnDown: String(c.GUI_QBITTORRENT_KILL_SWITCH_ON_VPN_DOWN || '').trim().toLowerCase() === 'on',
         },
         sabnzbd: {
             enabled: String(c.GUI_SABNZBD_ENABLED || '').trim().toLowerCase() === 'on',
@@ -1410,8 +1412,29 @@ async function qbittorrentEnsureBindTun0(q, preferences) {
     return { changed: true, desiredIf };
 }
 
+async function qbittorrentSetNetworkInterface(q, ifaceName) {
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    const prefs = {
+        current_network_interface: ifaceName,
+        current_interface_name: ifaceName,
+        current_interface_address: '',
+        net_interface: ifaceName,
+        net_bind_ip: '',
+    };
+    const form = new URLSearchParams();
+    form.set('json', JSON.stringify(prefs));
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    return prefs;
+}
+
 let lastQbitAutoConnected = null;
 let lastQbitAutoActionAtMs = 0;
+let lastQbitKillSwitchApplied = false;
 async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
     const { qbittorrent: q } = getGuiIntegrationConfig();
     if (!q.enabled) {
@@ -1435,6 +1458,12 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
     if (prev === connected) return;
 
     try {
+        if (!connected && q.killSwitchOnVpnDown && !lastQbitKillSwitchApplied) {
+            await qbittorrentSetNetworkInterface(q, 'lo');
+            lastQbitKillSwitchApplied = true;
+            lastQbitAutoActionAtMs = now;
+            console.log('[Integrations][qBittorrent] Kill switch applied: bound to lo (VPN down).');
+        }
         if (!connected && q.autoPauseOnVpnDown) {
             await qbittorrentPauseAll(q);
             lastQbitAutoActionAtMs = now;
@@ -1444,6 +1473,24 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
             await qbittorrentResumeAll(q);
             lastQbitAutoActionAtMs = now;
             console.log('[Integrations][qBittorrent] Auto-resumed torrents (VPN recovered).');
+        }
+        if (connected && q.killSwitchOnVpnDown && lastQbitKillSwitchApplied) {
+            // Restore safe tunnel binding when VPN is back.
+            const { cookie, agent } = await qbittorrentLoginCookie({
+                baseUrl: q.url,
+                username: q.username,
+                password: q.password,
+                insecureTls: q.insecureTls,
+            });
+            const prefsRaw = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+            let preferences = null;
+            try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
+            const r = await qbittorrentEnsureBindTun0(q, preferences);
+            if (r?.changed) {
+                console.log('[Integrations][qBittorrent] Kill switch released: bound back to tunnel (VPN up).');
+            }
+            lastQbitKillSwitchApplied = false;
+            lastQbitAutoActionAtMs = now;
         }
         if (connected && q.autoBindTun0) {
             // Enforce safe binding when VPN is up so qBittorrent won't leak.
@@ -1667,6 +1714,17 @@ function mergeHomelabState(patch) {
     } catch (e) {
         console.error('[Homelab] Failed to persist state:', e.message);
     }
+}
+
+function setStartupAutoConnectStatus(patch) {
+    const safe = patch && typeof patch === 'object' ? patch : {};
+    mergeHomelabState({
+        startupAutoConnect: {
+            ...(loadHomelabState().startupAutoConnect || {}),
+            ...safe,
+            at: new Date().toISOString(),
+        },
+    });
 }
 
 function appendConfigDiffHistory(changes) {
@@ -3025,6 +3083,7 @@ async function maybeAutostartGluetunOnStartup() {
                         console.log(
                             `[Startup] Gluetun running but profile incomplete (${describeVpnProfileGap(envMap)}). Applying saved GUI config (save + recreate)…`,
                         );
+                        setStartupAutoConnectStatus({ state: 'running', reason: 'engine_running_profile_incomplete' });
                         await migrateGuiEnvConfigInPlace(merged);
                         const prov = String(merged.VPN_SERVICE_PROVIDER || '').toLowerCase();
                         const vpnType = String(merged.VPN_TYPE || '').toLowerCase();
@@ -3035,6 +3094,7 @@ async function maybeAutostartGluetunOnStartup() {
                             const regions = String(merged.PIA_WG_REGIONS || merged.PIA_REGIONS || region || '').trim();
                             if (!region || !regions) {
                                 console.warn('[Startup] Auto-reapply skipped PIA WireGuard generate (missing PIA region list).');
+                                setStartupAutoConnectStatus({ state: 'skipped', reason: 'missing_pia_regions' });
                             } else {
                                 console.log(`[Startup] Auto-generating PIA WireGuard config for region "${region}"…`);
                                 await applyPiaWireguardFromCredentials({
@@ -3046,15 +3106,18 @@ async function maybeAutostartGluetunOnStartup() {
                                     PIA_REGION_INDEX: String(merged.PIA_REGION_INDEX || '0'),
                                 });
                                 console.log('[Startup] Auto-generate + connect complete (PIA WireGuard).');
+                                setStartupAutoConnectStatus({ state: 'success', mode: 'pia_wireguard_generate', region });
                             }
                         } else {
                             const out = await applyGuiConfiguration(merged);
                             console.log(`[Startup] Auto-reapply complete: ${out.message}`);
+                            setStartupAutoConnectStatus({ state: 'success', mode: 'apply', message: out.message });
                         }
                     }
                 }
             } catch (e) {
                 console.warn('[Startup] Auto-reapply check failed:', e.message);
+                setStartupAutoConnectStatus({ state: 'error', error: e.message, reason: 'auto_reapply_check_failed' });
             }
             return;
         }
@@ -3062,6 +3125,7 @@ async function maybeAutostartGluetunOnStartup() {
         console.log(
             `[Startup] Gluetun not running (${engine.exists ? engine.status || 'unknown' : 'missing'}); applying saved GUI config (save + recreate)…`,
         );
+        setStartupAutoConnectStatus({ state: 'running', reason: 'engine_not_running' });
         await migrateGuiEnvConfigInPlace(merged);
         {
             const prov = String(merged.VPN_SERVICE_PROVIDER || '').toLowerCase();
@@ -3075,6 +3139,7 @@ async function maybeAutostartGluetunOnStartup() {
                     console.warn('[Startup] Autostart skipped PIA WireGuard generate (missing PIA region list). Falling back to plain apply.');
                     const out = await applyGuiConfiguration(merged);
                     console.log(`[Startup] Autostart apply complete: ${out.message}`);
+                    setStartupAutoConnectStatus({ state: 'success', mode: 'apply', message: out.message, reason: 'missing_pia_regions' });
                 } else {
                     console.log(`[Startup] Auto-generating PIA WireGuard config for region "${region}"…`);
                     await applyPiaWireguardFromCredentials({
@@ -3086,10 +3151,12 @@ async function maybeAutostartGluetunOnStartup() {
                         PIA_REGION_INDEX: String(merged.PIA_REGION_INDEX || '0'),
                     });
                     console.log('[Startup] Autostart generate + connect complete (PIA WireGuard).');
+                    setStartupAutoConnectStatus({ state: 'success', mode: 'pia_wireguard_generate', region });
                 }
             } else {
                 const out = await applyGuiConfiguration(merged);
                 console.log(`[Startup] Autostart apply complete: ${out.message}`);
+                setStartupAutoConnectStatus({ state: 'success', mode: 'apply', message: out.message });
             }
         }
 
@@ -3098,8 +3165,10 @@ async function maybeAutostartGluetunOnStartup() {
         await new Promise((r) => setTimeout(r, delayMs));
         const probe = await runOutboundConnectivityProbePersist();
         console.log(`[Startup] Post-autostart connectivity probe: ${probe.ok ? 'OK' : 'FAIL'}${probe.publicIp ? ` (${probe.publicIp})` : ''}`);
+        setStartupAutoConnectStatus({ postProbeOk: !!probe.ok, postProbePublicIp: probe.publicIp || null });
     } catch (e) {
         console.error('[Startup] Autostart failed:', e.message);
+        setStartupAutoConnectStatus({ state: 'error', error: e.message });
     }
 }
 
