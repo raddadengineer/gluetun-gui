@@ -2170,6 +2170,9 @@ export default function Settings() {
                     <option value="doh">DNS over HTTPS (DoH)</option>
                     <option value="plain">Plain UDP</option>
                   </select>
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px', lineHeight: 1.45 }}>
+                    If you see Gluetun restarting due to healthcheck DNS timeouts, try <strong style={{ fontWeight: 700 }}>Plain UDP</strong>.
+                  </p>
                 </div>
                 <div className="form-group">
                   <label>Upstream Resolvers (comma separated)</label>

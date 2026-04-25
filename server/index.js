@@ -1038,6 +1038,25 @@ async function applyGuiConfiguration(config) {
         }
     }
 
+    // DNS: prevent invalid recursion when using plaintext upstream DNS.
+    // Plain upstream addresses must not point to the internal DNS listener (127.0.0.1:53).
+    const resolverType = String(config.DNS_UPSTREAM_RESOLVER_TYPE || '').trim().toLowerCase();
+    if (resolverType === 'plain') {
+        const raw = String(config.DNS_UPSTREAM_PLAIN_ADDRESSES || '').trim();
+        const toks = raw
+            ? raw.split(',').map((s) => s.trim()).filter(Boolean)
+            : [];
+        const bad = toks.some((t) => /^127\.0\.0\.1(?::53)?$/i.test(t) || /^\[?::1\]?(?::53)?$/i.test(t));
+        if (!toks.length || bad) {
+            config.DNS_UPSTREAM_PLAIN_ADDRESSES = '1.1.1.1:53,8.8.8.8:53';
+            console.log('[Config] Set safe DNS_UPSTREAM_PLAIN_ADDRESSES defaults for plain resolver type.');
+        }
+        // Plain mode doesn't use named resolvers list.
+        if (config.DNS_UPSTREAM_RESOLVERS && String(config.DNS_UPSTREAM_RESOLVERS).trim()) {
+            delete config.DNS_UPSTREAM_RESOLVERS;
+        }
+    }
+
     const beforeGui = parseEnvFileToMap(ENV_PATH);
 
     let envContent = '';
@@ -1147,6 +1166,15 @@ async function applyGuiConfiguration(config) {
             .join(',');
     }
 
+    // Backward compatibility: Settings UI can drive resolver type; older envs used DOT=on/off.
+    // When DNS_UPSTREAM_RESOLVER_TYPE is set, prefer it.
+    if (gluetunEnv.DNS_UPSTREAM_RESOLVER_TYPE) {
+        const t = String(gluetunEnv.DNS_UPSTREAM_RESOLVER_TYPE || '').trim().toLowerCase();
+        if (t === 'dot') gluetunEnv.DOT = 'on';
+        else if (t === 'plain') gluetunEnv.DOT = 'off';
+        // doh is separate in Gluetun; leave DOT unset for it.
+    }
+
     if (gluetunEnv.WIREGUARD_ADDRESSES) {
         const addrs = gluetunEnv.WIREGUARD_ADDRESSES.split(',').map(a => a.trim());
         let ipv4 = addrs.find(a => a.includes('.'));
@@ -1155,7 +1183,7 @@ async function applyGuiConfiguration(config) {
         gluetunEnv.WIREGUARD_ADDRESSES = ipv4;
     }
 
-    ['FIREWALL', 'FIREWALL_DEBUG', 'DOT'].forEach(k => delete gluetunEnv[k]);
+    ['FIREWALL', 'FIREWALL_DEBUG'].forEach(k => delete gluetunEnv[k]);
 
     if (gluetunEnv.VPN_SERVICE_PROVIDER === 'private internet access' && gluetunEnv.VPN_TYPE === 'wireguard') {
         gluetunEnv.VPN_SERVICE_PROVIDER = 'custom';
