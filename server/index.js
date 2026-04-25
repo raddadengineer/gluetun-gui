@@ -414,6 +414,7 @@ app.get('/api/status', authenticateToken, async (req, res) => {
                 PIA_PORT_FORWARDING: guiEnv.PIA_PORT_FORWARDING || null,
                 GUI_QBITTORRENT_ENABLED: guiEnv.GUI_QBITTORRENT_ENABLED || null,
                 GUI_QBITTORRENT_DASHBOARD_WIDGET: guiEnv.GUI_QBITTORRENT_DASHBOARD_WIDGET || null,
+                GUI_QBITTORRENT_AUTO_BIND_TUN0: guiEnv.GUI_QBITTORRENT_AUTO_BIND_TUN0 || null,
                 GUI_SABNZBD_ENABLED: guiEnv.GUI_SABNZBD_ENABLED || null,
                 GUI_SABNZBD_DASHBOARD_WIDGET: guiEnv.GUI_SABNZBD_DASHBOARD_WIDGET || null,
             },
@@ -609,6 +610,8 @@ async function recreateGluetunContainer(newEnvObj) {
         const oldContainer = docker.getContainer(gluetunInfo.Id);
         const inspectData = await oldContainer.inspect().catch(() => null);
         if (!inspectData) return 'Container inspect failed';
+        const oldGluetunId = gluetunInfo.Id;
+        const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
 
         await oldContainer.stop().catch(() => {});
         await oldContainer.remove().catch(() => {});
@@ -660,6 +663,88 @@ async function recreateGluetunContainer(newEnvObj) {
 
         const newContainer = await docker.createContainer(createOpts);
         await newContainer.start();
+        const newGluetunId = newContainer?.id || (await newContainer.inspect().then(i => i.Id).catch(() => null));
+
+        // If Gluetun is recreated, any containers sharing its network namespace (container:<oldId>)
+        // must also be recreated to attach to the new namespace; restart is not enough.
+        try {
+            const all = await docker.listContainers({ all: true });
+            for (const c of all) {
+                if (!c?.Id || c.Id === oldGluetunId) continue;
+                const cont = docker.getContainer(c.Id);
+                const i = await cont.inspect().catch(() => null);
+                const nm = i?.HostConfig?.NetworkMode || '';
+                const isOldNetns =
+                    nm === `container:${oldGluetunId}` ||
+                    nm === `container:${oldGluetunName}` ||
+                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)));
+                if (!isOldNetns) continue;
+                const name = (i?.Name || '').replace(/^\//, '');
+                console.log(`[Startup] Recreating dependent container "${name}" to follow new Gluetun netns.`);
+                await cont.stop().catch(() => {});
+                await cont.remove().catch(() => {});
+
+                const newHostConfig = { ...(i.HostConfig || {}) };
+                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+
+                const create = {
+                    name,
+                    Image: i.Config.Image,
+                    Env: i.Config.Env,
+                    Cmd: i.Config.Cmd,
+                    Entrypoint: i.Config.Entrypoint,
+                    WorkingDir: i.Config.WorkingDir,
+                    User: i.Config.User,
+                    Labels: i.Config.Labels,
+                    HostConfig: finalHostConfig,
+                };
+                const nc = await docker.createContainer(create);
+                await nc.start();
+            }
+
+            // Safety net: if we recreated Gluetun, also recreate known client containers that might be pinned
+            // to the previous network namespace even when Docker reports a name-based network mode.
+            const pinnedClientNames = new Set(['qbittorrent', 'sabnzbd']);
+            for (const c of all) {
+                if (!c?.Id || c.Id === oldGluetunId) continue;
+                const cont = docker.getContainer(c.Id);
+                const i = await cont.inspect().catch(() => null);
+                const name = (i?.Name || '').replace(/^\//, '');
+                if (!pinnedClientNames.has(name)) continue;
+                const nm = i?.HostConfig?.NetworkMode || '';
+                if (!String(nm).startsWith('container:')) continue;
+                // Already handled by the loop above
+                if (
+                    nm === `container:${oldGluetunId}` ||
+                    nm === `container:${oldGluetunName}` ||
+                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)))
+                ) {
+                    continue;
+                }
+                console.log(`[Startup] Recreating pinned client "${name}" to ensure it follows Gluetun netns.`);
+                await cont.stop().catch(() => {});
+                await cont.remove().catch(() => {});
+                const newHostConfig = { ...(i.HostConfig || {}) };
+                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+                const create = {
+                    name,
+                    Image: i.Config.Image,
+                    Env: i.Config.Env,
+                    Cmd: i.Config.Cmd,
+                    Entrypoint: i.Config.Entrypoint,
+                    WorkingDir: i.Config.WorkingDir,
+                    User: i.Config.User,
+                    Labels: i.Config.Labels,
+                    HostConfig: finalHostConfig,
+                };
+                const nc = await docker.createContainer(create);
+                await nc.start();
+            }
+        } catch (e) {
+            console.warn('[Startup] Dependent netns recreate skipped:', e.message);
+        }
         return 'Gluetun recreated successfully.';
     }
     return 'Gluetun container not found. Restart via docker-compose required.';
@@ -674,6 +759,15 @@ function normalizeGluetunUpdaterPeriod(value) {
     if (/[a-zA-Zµ]+$/.test(s)) return s;
     if (/^-?\d+(\.\d+)?$/.test(s)) return `${s}h`;
     return s;
+}
+
+function sanitizeHostConfigForContainerNetworkMode(hostConfig) {
+    const hc = { ...(hostConfig || {}) };
+    // These conflict with container:... network mode (ports must be published on the target netns container).
+    delete hc.PortBindings;
+    delete hc.PublishAllPorts;
+    delete hc.ExposedPorts;
+    return hc;
 }
 
 /**
@@ -821,6 +915,16 @@ function looksLikeSavedVpnSettings(config) {
     if (!hasProvider) return false;
 
     const vpnType = String(c.VPN_TYPE || '').trim().toLowerCase();
+    const pfOn =
+        String(c.PIA_PORT_FORWARDING || '').trim().toLowerCase() === 'true' ||
+        String(c.PIA_PORT_FORWARDING || '').trim().toLowerCase() === 'on' ||
+        String(c.VPN_PORT_FORWARDING || '').trim().toLowerCase() === 'true' ||
+        String(c.VPN_PORT_FORWARDING || '').trim().toLowerCase() === 'on';
+    const pfProvider = String(c.VPN_PORT_FORWARDING_PROVIDER || '').trim().toLowerCase();
+    const needsPiaPfServerName = pfOn && (pfProvider.includes('private internet access') || pfProvider === 'pia');
+    if (needsPiaPfServerName && !String(c.SERVER_NAMES || '').trim()) {
+        return false;
+    }
     const hasOpenVpnCreds = !!String(c.OPENVPN_USER || '').trim() && !!String(c.OPENVPN_PASSWORD || '').trim();
     const hasPiaCreds = !!String(c.PIA_USERNAME || '').trim() && !!String(c.PIA_PASSWORD || '').trim();
     const wgKey = !!String(c.WIREGUARD_PRIVATE_KEY || '').trim();
@@ -848,6 +952,15 @@ function describeVpnProfileGap(config) {
     if (!String(c.VPN_SERVICE_PROVIDER || '').trim()) parts.push('VPN_SERVICE_PROVIDER empty');
     const vt = String(c.VPN_TYPE || '').trim();
     if (!vt) parts.push('VPN_TYPE empty');
+    const pfOn =
+        String(c.PIA_PORT_FORWARDING || '').trim().toLowerCase() === 'true' ||
+        String(c.PIA_PORT_FORWARDING || '').trim().toLowerCase() === 'on' ||
+        String(c.VPN_PORT_FORWARDING || '').trim().toLowerCase() === 'true' ||
+        String(c.VPN_PORT_FORWARDING || '').trim().toLowerCase() === 'on';
+    const pfProvider = String(c.VPN_PORT_FORWARDING_PROVIDER || '').trim().toLowerCase();
+    if (pfOn && (pfProvider.includes('private internet access') || pfProvider === 'pia')) {
+        if (!String(c.SERVER_NAMES || '').trim()) parts.push('SERVER_NAMES empty (required for PIA port forwarding)');
+    }
     const hasOv = !!String(c.OPENVPN_USER || '').trim() && !!String(c.OPENVPN_PASSWORD || '').trim();
     const hasPia = !!String(c.PIA_USERNAME || '').trim() && !!String(c.PIA_PASSWORD || '').trim();
     const wgKey = !!String(c.WIREGUARD_PRIVATE_KEY || '').trim();
@@ -858,6 +971,18 @@ function describeVpnProfileGap(config) {
     if (!hasOv && !hasPia && !wgKey) parts.push('no OPENVPN_*, PIA_*, or WIREGUARD_PRIVATE_KEY (merge gui-config.env + gluetun.env)');
     else if (wgKey && !wgEp && !hasPia && !hasOv) parts.push('WireGuard key but no addresses/endpoint and no PIA/OpenVPN creds');
     return parts.join('; ') || 'profile incomplete';
+}
+
+function selectPiaWireguardRegionFromConfig(config) {
+    const c = config || {};
+    const direct = String(c.PIA_REGION || '').trim();
+    if (direct) return direct;
+    const list = String(c.PIA_WG_REGIONS || c.PIA_REGIONS || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!list.length) return '';
+    let idx = parseInt(String(c.PIA_REGION_INDEX || '0'), 10);
+    if (!Number.isFinite(idx) || idx < 0) idx = 0;
+    if (idx >= list.length) idx = 0;
+    return list[idx] || list[0] || '';
 }
 
 async function engineContainerRunningState() {
@@ -959,6 +1084,8 @@ async function applyGuiConfiguration(config) {
         'GUI_QBITTORRENT_INSECURE_TLS',
         'GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN',
         'GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP',
+        'GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD',
+        'GUI_QBITTORRENT_AUTO_BIND_TUN0',
         'GUI_SABNZBD_ENABLED',
         'GUI_SABNZBD_DASHBOARD_WIDGET',
         'GUI_SABNZBD_URL',
@@ -1106,6 +1233,8 @@ function getGuiIntegrationConfig() {
             insecureTls: String(c.GUI_QBITTORRENT_INSECURE_TLS || '').trim().toLowerCase() === 'on',
             autoPauseOnVpnDown: String(c.GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN || '').trim().toLowerCase() === 'on',
             autoResumeOnVpnUp: String(c.GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP || '').trim().toLowerCase() === 'on',
+            autoSyncPortForward: String(c.GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD || '').trim().toLowerCase() === 'on',
+            autoBindTun0: String(c.GUI_QBITTORRENT_AUTO_BIND_TUN0 || '').trim().toLowerCase() === 'on',
         },
         sabnzbd: {
             enabled: String(c.GUI_SABNZBD_ENABLED || '').trim().toLowerCase() === 'on',
@@ -1139,10 +1268,22 @@ async function qbittorrentLoginCookie({ baseUrl, username, password, insecureTls
     if (!String(txt || '').toLowerCase().includes('ok')) {
         throw new Error(`qBittorrent login rejected${txt ? `: ${txt}` : ''}`);
     }
-    const setCookie = res.headers.get('set-cookie') || '';
-    const m = setCookie.match(/SID=[^;]+/);
-    if (!m) throw new Error('qBittorrent did not return SID cookie (check WebUI auth settings).');
-    return { cookie: m[0], agent };
+    // Node fetch may expose Set-Cookie via getSetCookie() (preferred) or a merged set-cookie header.
+    let setCookie = '';
+    try {
+        if (typeof res.headers.getSetCookie === 'function') {
+            const arr = res.headers.getSetCookie();
+            setCookie = Array.isArray(arr) ? arr.join('\n') : String(arr || '');
+        } else {
+            setCookie = res.headers.get('set-cookie') || '';
+        }
+    } catch {
+        setCookie = res.headers.get('set-cookie') || '';
+    }
+    const m = String(setCookie || '').match(/SID=[^;]+/);
+    // Some setups disable auth or use a reverse proxy that strips Set-Cookie.
+    // If login succeeded but we got no SID cookie, proceed without a cookie.
+    return { cookie: m ? m[0] : null, agent };
 }
 
 async function qbittorrentFetch({ baseUrl, path: p, method = 'GET', cookie, agent, form }) {
@@ -1209,6 +1350,66 @@ async function qbittorrentApplySafeDefaults(q) {
     return prefs;
 }
 
+async function qbittorrentSetListenPort(q, port) {
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    const prefs = { listen_port: port };
+    const form = new URLSearchParams();
+    form.set('json', JSON.stringify(prefs));
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    return prefs;
+}
+
+async function qbittorrentEnsureBindTun0(q, preferences) {
+    if (!q.autoBindTun0) return { changed: false };
+    const cur = preferences && typeof preferences === 'object' ? preferences : {};
+    const curIf = String(cur.current_network_interface ?? cur.net_interface ?? '').trim();
+    const curBindIp = String(cur.current_interface_address ?? cur.net_bind_ip ?? '').trim();
+    let desiredIf = 'tun0';
+    try {
+        const containers = await docker.listContainers({ all: true });
+        const gluetun = findGluetunEngineContainer(containers);
+        if (gluetun) {
+            const container = docker.getContainer(gluetun.Id);
+            const devExec = await container.exec({ Cmd: ['sh', '-c', 'cat /proc/net/dev 2>/dev/null || true'], AttachStdout: true, AttachStderr: true });
+            const devStream = await devExec.start();
+            const devText = await collectExecOutput(devStream, 3500);
+            const hasWg0 = /^\s*wg0:/m.test(devText);
+            const hasTun0 = /^\s*tun0:/m.test(devText);
+            if (hasWg0) desiredIf = 'wg0';
+            else if (hasTun0) desiredIf = 'tun0';
+        }
+    } catch {
+        // if detection fails, fall back to tun0
+    }
+
+    if (curIf === desiredIf && curBindIp === '') return { changed: false, desiredIf };
+
+    const { cookie, agent } = await qbittorrentLoginCookie({
+        baseUrl: q.url,
+        username: q.username,
+        password: q.password,
+        insecureTls: q.insecureTls,
+    });
+    // qBittorrent preference keys differ by version; set both legacy and current keys.
+    const prefs = {
+        current_network_interface: desiredIf,
+        current_interface_name: desiredIf,
+        current_interface_address: '',
+        net_interface: desiredIf,
+        net_bind_ip: '',
+    };
+    const form = new URLSearchParams();
+    form.set('json', JSON.stringify(prefs));
+    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    console.log(`[Integrations][qBittorrent] auto-bind applied: ${desiredIf}`);
+    return { changed: true, desiredIf };
+}
+
 let lastQbitAutoConnected = null;
 let lastQbitAutoActionAtMs = 0;
 async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
@@ -1244,8 +1445,48 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
             lastQbitAutoActionAtMs = now;
             console.log('[Integrations][qBittorrent] Auto-resumed torrents (VPN recovered).');
         }
+        if (connected && q.autoBindTun0) {
+            // Enforce safe binding when VPN is up so qBittorrent won't leak.
+            const { cookie, agent } = await qbittorrentLoginCookie({
+                baseUrl: q.url,
+                username: q.username,
+                password: q.password,
+                insecureTls: q.insecureTls,
+            });
+            const prefsRaw = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+            let preferences = null;
+            try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
+            const r = await qbittorrentEnsureBindTun0(q, preferences);
+            if (r?.changed) {
+                lastQbitAutoActionAtMs = now;
+                console.log('[Integrations][qBittorrent] Auto-bound interface on VPN up.');
+            }
+        }
     } catch (e) {
         console.warn('[Integrations][qBittorrent] Auto-manage failed:', e.message);
+    }
+}
+
+let lastQbitAutoSyncedPort = null;
+let lastQbitAutoSyncAtMs = 0;
+async function maybeAutoSyncQbittorrentForwardedPort(newPort) {
+    const { qbittorrent: q } = getGuiIntegrationConfig();
+    if (!q.enabled || !q.autoSyncPortForward) return;
+    if (!q.url || !q.username || !q.password) return;
+    const port = Number(newPort);
+    if (!Number.isFinite(port) || port <= 0) return;
+
+    const now = Date.now();
+    if (now - lastQbitAutoSyncAtMs < 8000) return;
+    if (lastQbitAutoSyncedPort === port) return;
+
+    try {
+        await qbittorrentSetListenPort(q, port);
+        lastQbitAutoSyncedPort = port;
+        lastQbitAutoSyncAtMs = now;
+        console.log('[Integrations][qBittorrent] auto-sync listen_port ->', port);
+    } catch (e) {
+        console.warn('[Integrations][qBittorrent] auto-sync failed:', e.message);
     }
 }
 
@@ -2204,7 +2445,7 @@ async function applyPiaWireguardFromCredentials({
 
     console.log('[PIA-WG] Running command:', cmd.replace(PIA_PASSWORD, '***'));
 
-    await new Promise((resolve, reject) => {
+    const cmdOutput = await new Promise((resolve, reject) => {
         exec(cmd, { timeout: 30000, env: { ...process.env, GODEBUG: 'x509ignoreCN=0' } }, (error, stdout, stderr) => {
             console.log('[PIA-WG] stdout:', stdout);
             console.log('[PIA-WG] stderr:', stderr);
@@ -2242,6 +2483,19 @@ async function applyPiaWireguardFromCredentials({
             const headerMatch = wgConf.match(/#\s*Server:\s*(.+)/);
             if (headerMatch) serverName = headerMatch[1].trim();
         }
+        if (!serverName) {
+            const hostMatch = wgConf.match(/#\s*(?:Hostname|Host|Server hostname)\s*:\s*(.+)/i);
+            if (hostMatch) serverName = hostMatch[1].trim();
+        }
+    }
+
+    if (!serverName) {
+        const out = String(cmdOutput || '');
+        const m1 = out.match(/ServerCommonName\s*=\s*([^\s]+)/i);
+        const m2 = out.match(/server common name\s*[:=]\s*([^\s]+)/i);
+        const m3 = out.match(/\bCN\s*=\s*([a-z0-9_-]{3,})/i);
+        const m = m1 || m2 || m3;
+        if (m && m[1]) serverName = String(m[1]).trim();
     }
 
     if (!privateKey) {
@@ -2290,6 +2544,20 @@ async function applyPiaWireguardFromCredentials({
             }
         });
     }
+    // If PIA PF is enabled and the generator did not produce a server name,
+    // keep the last known SERVER_NAMES so Gluetun port-forwarding doesn't panic.
+    if (pfOn && !serverName && envVars.SERVER_NAMES) {
+        serverName = String(envVars.SERVER_NAMES).trim() || null;
+        if (serverName) {
+            console.log(`[PIA-WG] Using existing SERVER_NAMES=${serverName} (wg0.conf did not include ServerCommonName).`);
+        }
+    }
+    // As a final fallback, set a non-empty placeholder so Gluetun doesn't panic.
+    // If it's wrong, Gluetun will log a TLS verification error that reveals the correct server name.
+    if (pfOn && !serverName) {
+        serverName = 'invalid';
+        console.warn('[PIA-WG] SERVER_NAMES missing; using placeholder "invalid" to avoid Gluetun panic. Check Gluetun logs for correct certificate name.');
+    }
     envVars.PIA_USERNAME = PIA_USERNAME;
     envVars.PIA_PASSWORD = PIA_PASSWORD;
     envVars.PIA_REGIONS = PIA_REGIONS;
@@ -2333,6 +2601,8 @@ async function applyPiaWireguardFromCredentials({
     if (gluetunInfo) {
         const oldContainer = docker.getContainer(gluetunInfo.Id);
         const inspectData = await oldContainer.inspect();
+        const oldGluetunId = gluetunInfo.Id;
+        const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
 
         await oldContainer.stop().catch(() => { });
         await oldContainer.remove().catch(() => { });
@@ -2372,8 +2642,80 @@ async function applyPiaWireguardFromCredentials({
 
         const newContainer = await docker.createContainer(createOpts);
         await newContainer.start();
+        const newGluetunId = newContainer?.id || (await newContainer.inspect().then(i => i.Id).catch(() => null));
         restartMsg = ' Gluetun recreated with new WireGuard config.';
         console.log('[PIA-WG] Gluetun container recreated successfully');
+
+        // Recreate any containers sharing Gluetun's network namespace so they follow the new container id.
+        try {
+            const all = await docker.listContainers({ all: true });
+            for (const c of all) {
+                if (!c?.Id || c.Id === oldGluetunId) continue;
+                const cont = docker.getContainer(c.Id);
+                const i = await cont.inspect().catch(() => null);
+                const nm = i?.HostConfig?.NetworkMode || '';
+                const isOldNetns =
+                    nm === `container:${oldGluetunId}` ||
+                    nm === `container:${oldGluetunName}` ||
+                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)));
+                if (!isOldNetns) continue;
+                const name = (i?.Name || '').replace(/^\//, '');
+                console.log(`[PIA-WG] Recreating dependent container "${name}" to follow new Gluetun netns.`);
+                await cont.stop().catch(() => {});
+                await cont.remove().catch(() => {});
+                const newHostConfig = { ...(i.HostConfig || {}) };
+                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+                const createDep = {
+                    name,
+                    Image: i.Config.Image,
+                    Env: i.Config.Env,
+                    Cmd: i.Config.Cmd,
+                    Entrypoint: i.Config.Entrypoint,
+                    WorkingDir: i.Config.WorkingDir,
+                    User: i.Config.User,
+                    Labels: i.Config.Labels,
+                    HostConfig: finalHostConfig,
+                };
+                const nc = await docker.createContainer(createDep);
+                await nc.start();
+            }
+
+            // Safety net: qbittorrent (and other client containers) can remain pinned to a stale
+            // container:<id> netns after Gluetun is recreated by this pipeline. If so, recreate it
+            // to point at the new Gluetun id even if the old id doesn't match what we captured.
+            const pinned = ['qbittorrent', 'sabnzbd'];
+            for (const name of pinned) {
+                const cInfo = all.find((c) => (c.Names || []).some((n) => n === `/${name}`));
+                if (!cInfo) continue;
+                const cont = docker.getContainer(cInfo.Id);
+                const i = await cont.inspect().catch(() => null);
+                const nm = String(i?.HostConfig?.NetworkMode || '');
+                if (!nm.startsWith('container:')) continue;
+                if (newGluetunId && nm === `container:${newGluetunId}`) continue;
+                console.log(`[PIA-WG] Recreating pinned client "${name}" to follow Gluetun netns.`);
+                await cont.stop().catch(() => {});
+                await cont.remove().catch(() => {});
+                const newHostConfig = { ...(i.HostConfig || {}) };
+                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+                const createDep = {
+                    name,
+                    Image: i.Config.Image,
+                    Env: i.Config.Env,
+                    Cmd: i.Config.Cmd,
+                    Entrypoint: i.Config.Entrypoint,
+                    WorkingDir: i.Config.WorkingDir,
+                    User: i.Config.User,
+                    Labels: i.Config.Labels,
+                    HostConfig: finalHostConfig,
+                };
+                const nc = await docker.createContainer(createDep);
+                await nc.start();
+            }
+        } catch (e) {
+            console.warn('[PIA-WG] Dependent netns recreate skipped:', e.message);
+        }
     } else {
         restartMsg = ' Warning: Gluetun container not found.';
     }
@@ -2662,10 +3004,6 @@ async function maybeAutostartGluetunOnStartup() {
         return;
     }
 
-    if (engine.running) {
-        return;
-    }
-
     const merged = readMergedAutostartConfig();
     if (!looksLikeSavedVpnSettings(merged)) {
         console.log(
@@ -2675,12 +3013,85 @@ async function maybeAutostartGluetunOnStartup() {
     }
 
     try {
+        if (engine.running) {
+            // Compose recreates can start Gluetun with no env_file; if we have a saved profile, re-apply it once.
+            try {
+                const containers = await docker.listContainers({ all: true });
+                const g = findGluetunEngineContainer(containers);
+                if (g) {
+                    const inspectData = await docker.getContainer(g.Id).inspect();
+                    const envMap = envArrayToMap(inspectData?.Config?.Env || []);
+                    if (!looksLikeSavedVpnSettings(envMap)) {
+                        console.log(
+                            `[Startup] Gluetun running but profile incomplete (${describeVpnProfileGap(envMap)}). Applying saved GUI config (save + recreate)…`,
+                        );
+                        await migrateGuiEnvConfigInPlace(merged);
+                        const prov = String(merged.VPN_SERVICE_PROVIDER || '').toLowerCase();
+                        const vpnType = String(merged.VPN_TYPE || '').toLowerCase();
+                        const isPia = prov.includes('private internet access');
+                        const isWg = vpnType === 'wireguard';
+                        if (isPia && isWg && merged.PIA_USERNAME && merged.PIA_PASSWORD) {
+                            const region = selectPiaWireguardRegionFromConfig(merged);
+                            const regions = String(merged.PIA_WG_REGIONS || merged.PIA_REGIONS || region || '').trim();
+                            if (!region || !regions) {
+                                console.warn('[Startup] Auto-reapply skipped PIA WireGuard generate (missing PIA region list).');
+                            } else {
+                                console.log(`[Startup] Auto-generating PIA WireGuard config for region "${region}"…`);
+                                await applyPiaWireguardFromCredentials({
+                                    PIA_USERNAME: merged.PIA_USERNAME,
+                                    PIA_PASSWORD: merged.PIA_PASSWORD,
+                                    PIA_REGION: region,
+                                    PIA_PORT_FORWARDING: merged.PIA_PORT_FORWARDING || merged.VPN_PORT_FORWARDING || 'false',
+                                    PIA_REGIONS: regions,
+                                    PIA_REGION_INDEX: String(merged.PIA_REGION_INDEX || '0'),
+                                });
+                                console.log('[Startup] Auto-generate + connect complete (PIA WireGuard).');
+                            }
+                        } else {
+                            const out = await applyGuiConfiguration(merged);
+                            console.log(`[Startup] Auto-reapply complete: ${out.message}`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('[Startup] Auto-reapply check failed:', e.message);
+            }
+            return;
+        }
+
         console.log(
             `[Startup] Gluetun not running (${engine.exists ? engine.status || 'unknown' : 'missing'}); applying saved GUI config (save + recreate)…`,
         );
         await migrateGuiEnvConfigInPlace(merged);
-        const out = await applyGuiConfiguration(merged);
-        console.log(`[Startup] Autostart apply complete: ${out.message}`);
+        {
+            const prov = String(merged.VPN_SERVICE_PROVIDER || '').toLowerCase();
+            const vpnType = String(merged.VPN_TYPE || '').toLowerCase();
+            const isPia = prov.includes('private internet access');
+            const isWg = vpnType === 'wireguard';
+            if (isPia && isWg && merged.PIA_USERNAME && merged.PIA_PASSWORD) {
+                const region = selectPiaWireguardRegionFromConfig(merged);
+                const regions = String(merged.PIA_WG_REGIONS || merged.PIA_REGIONS || region || '').trim();
+                if (!region || !regions) {
+                    console.warn('[Startup] Autostart skipped PIA WireGuard generate (missing PIA region list). Falling back to plain apply.');
+                    const out = await applyGuiConfiguration(merged);
+                    console.log(`[Startup] Autostart apply complete: ${out.message}`);
+                } else {
+                    console.log(`[Startup] Auto-generating PIA WireGuard config for region "${region}"…`);
+                    await applyPiaWireguardFromCredentials({
+                        PIA_USERNAME: merged.PIA_USERNAME,
+                        PIA_PASSWORD: merged.PIA_PASSWORD,
+                        PIA_REGION: region,
+                        PIA_PORT_FORWARDING: merged.PIA_PORT_FORWARDING || merged.VPN_PORT_FORWARDING || 'false',
+                        PIA_REGIONS: regions,
+                        PIA_REGION_INDEX: String(merged.PIA_REGION_INDEX || '0'),
+                    });
+                    console.log('[Startup] Autostart generate + connect complete (PIA WireGuard).');
+                }
+            } else {
+                const out = await applyGuiConfiguration(merged);
+                console.log(`[Startup] Autostart apply complete: ${out.message}`);
+            }
+        }
 
         const vpnType = String(merged.VPN_TYPE || 'wireguard').toLowerCase();
         const delayMs = vpnType === 'openvpn' ? 8000 : 3500;
@@ -2900,6 +3311,7 @@ async function checkVPN() {
                         console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${filePort}`);
                     }
                     lastForwardedPort = filePort;
+                    maybeAutoSyncQbittorrentForwardedPort(filePort);
                     console.log(`[Monitor] Port Forwarding Active (file): ${filePort}`);
                 } else {
                     // Secondary: query control server (may be auth protected; treat auth as "skip", not failure).
@@ -2919,6 +3331,7 @@ async function checkVPN() {
                                 console.log(`[Monitor] Port changed: ${lastForwardedPort} -> ${port}`);
                             }
                             lastForwardedPort = port;
+                            maybeAutoSyncQbittorrentForwardedPort(port);
                             console.log(`[Monitor] Port Forwarding Active: ${port}`);
                         } else {
                             pfFailCount++;
@@ -3116,6 +3529,7 @@ app.get('/api/compose-snippet', authenticateToken, async (req, res) => {
 app.get('/api/integrations/qbittorrent/status', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] status request');
         if (!q.enabled) return res.json({ enabled: false });
         if (!q.url) return res.json({ enabled: true, configured: false });
         if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
@@ -3155,6 +3569,7 @@ app.get('/api/integrations/qbittorrent/status', authenticateToken, async (req, r
             transferInfo,
         });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] status failed:', e.message);
         res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach qBittorrent.' });
     }
 });
@@ -3162,6 +3577,7 @@ app.get('/api/integrations/qbittorrent/status', authenticateToken, async (req, r
 app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] bind-vpn request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
         if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
@@ -3176,7 +3592,13 @@ app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req
             insecureTls: q.insecureTls,
         });
 
-        const prefs = { net_interface: netInterface, net_bind_ip: bindIp };
+        const prefs = {
+            current_network_interface: netInterface,
+            current_interface_name: netInterface,
+            current_interface_address: bindIp,
+            net_interface: netInterface,
+            net_bind_ip: bindIp,
+        };
         const form = new URLSearchParams();
         form.set('json', JSON.stringify(prefs));
 
@@ -3189,8 +3611,10 @@ app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req
             form,
         });
 
+        console.log('[Integrations][qBittorrent] bind-vpn applied:', JSON.stringify(prefs));
         res.json({ ok: true, applied: prefs });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] bind-vpn failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to set qBittorrent preferences.' });
     }
 });
@@ -3198,6 +3622,7 @@ app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req
 app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] details request');
         if (!q.enabled) return res.json({ enabled: false });
         if (!q.url) return res.json({ enabled: true, configured: false });
         if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
@@ -3220,6 +3645,17 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
         try { transferInfo = JSON.parse(transferRaw); } catch { transferInfo = null; }
         try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
 
+        // Optional: enforce safe binding when toggle is on.
+        try {
+            const r = await qbittorrentEnsureBindTun0(q, preferences);
+            if (r?.changed) {
+                const prefsRaw2 = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+                try { preferences = JSON.parse(prefsRaw2); } catch { /* keep old */ }
+            }
+        } catch (e) {
+            console.warn('[Integrations][qBittorrent] auto-bind failed:', e.message);
+        }
+
         res.json({
             enabled: true,
             configured: true,
@@ -3228,8 +3664,8 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
             transferInfo,
             preferences: preferences
                 ? {
-                      net_interface: preferences.net_interface ?? null,
-                      net_bind_ip: preferences.net_bind_ip ?? null,
+                      net_interface: preferences.current_network_interface ?? preferences.net_interface ?? null,
+                      net_bind_ip: preferences.current_interface_address ?? preferences.net_bind_ip ?? null,
                       listen_port: preferences.listen_port ?? null,
                   }
                 : null,
@@ -3238,6 +3674,7 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
             },
         });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] details failed:', e.message);
         res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach qBittorrent.' });
     }
 });
@@ -3245,6 +3682,7 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
 app.post('/api/integrations/qbittorrent/torrents/pause-all', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] pause-all request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
         if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
@@ -3257,8 +3695,10 @@ app.post('/api/integrations/qbittorrent/torrents/pause-all', authenticateToken, 
         const form = new URLSearchParams();
         form.set('hashes', 'all');
         await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/pause', method: 'POST', cookie, agent, form });
+        console.log('[Integrations][qBittorrent] pause-all applied');
         res.json({ ok: true });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] pause-all failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to pause torrents.' });
     }
 });
@@ -3266,6 +3706,7 @@ app.post('/api/integrations/qbittorrent/torrents/pause-all', authenticateToken, 
 app.post('/api/integrations/qbittorrent/torrents/resume-all', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] resume-all request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
         if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
@@ -3278,8 +3719,10 @@ app.post('/api/integrations/qbittorrent/torrents/resume-all', authenticateToken,
         const form = new URLSearchParams();
         form.set('hashes', 'all');
         await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/resume', method: 'POST', cookie, agent, form });
+        console.log('[Integrations][qBittorrent] resume-all applied');
         res.json({ ok: true });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] resume-all failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to resume torrents.' });
     }
 });
@@ -3287,6 +3730,7 @@ app.post('/api/integrations/qbittorrent/torrents/resume-all', authenticateToken,
 app.post('/api/integrations/qbittorrent/sync-port-forward', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] sync-port-forward request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
         if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
@@ -3294,19 +3738,11 @@ app.post('/api/integrations/qbittorrent/sync-port-forward', authenticateToken, a
         if (!Number.isFinite(port) || port <= 0) {
             return res.status(400).json({ error: 'No forwarded port detected from the VPN monitor.' });
         }
-
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
-        const prefs = { listen_port: port };
-        const form = new URLSearchParams();
-        form.set('json', JSON.stringify(prefs));
-        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+        const prefs = await qbittorrentSetListenPort(q, port);
+        console.log('[Integrations][qBittorrent] sync-port-forward applied:', port);
         res.json({ ok: true, applied: prefs, forwardedPort: port });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] sync-port-forward failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to sync port.' });
     }
 });
@@ -3314,12 +3750,15 @@ app.post('/api/integrations/qbittorrent/sync-port-forward', authenticateToken, a
 app.post('/api/integrations/qbittorrent/apply-safe-defaults', authenticateToken, async (req, res) => {
     try {
         const { qbittorrent: q } = getGuiIntegrationConfig();
+        console.log('[Integrations][qBittorrent] apply-safe-defaults request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
         if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
         const applied = await qbittorrentApplySafeDefaults(q);
+        console.log('[Integrations][qBittorrent] apply-safe-defaults applied');
         res.json({ ok: true, applied });
     } catch (e) {
+        console.warn('[Integrations][qBittorrent] apply-safe-defaults failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to apply safe defaults.' });
     }
 });
@@ -3328,6 +3767,7 @@ app.post('/api/integrations/qbittorrent/apply-safe-defaults', authenticateToken,
 app.get('/api/integrations/sabnzbd/details', authenticateToken, async (req, res) => {
     try {
         const { sabnzbd: s } = getGuiIntegrationConfig();
+        console.log('[Integrations][SABnzbd] details request');
         if (!s.enabled) return res.json({ enabled: false });
         if (!s.url) return res.json({ enabled: true, configured: false });
         if (!s.apiKey) return res.json({ enabled: true, configured: true, ok: false, error: 'Missing API key.' });
@@ -3357,6 +3797,7 @@ app.get('/api/integrations/sabnzbd/details', authenticateToken, async (req, res)
             },
         });
     } catch (e) {
+        console.warn('[Integrations][SABnzbd] details failed:', e.message);
         res.json({ enabled: true, configured: true, ok: false, error: e.message || 'Failed to reach SABnzbd.' });
     }
 });
@@ -3364,12 +3805,15 @@ app.get('/api/integrations/sabnzbd/details', authenticateToken, async (req, res)
 app.post('/api/integrations/sabnzbd/pause', authenticateToken, async (req, res) => {
     try {
         const { sabnzbd: s } = getGuiIntegrationConfig();
+        console.log('[Integrations][SABnzbd] pause request');
         if (!s.enabled) return res.status(400).json({ error: 'SABnzbd integration is disabled.' });
         if (!s.url) return res.status(400).json({ error: 'SABnzbd URL is not set.' });
         if (!s.apiKey) return res.status(400).json({ error: 'SABnzbd API key missing.' });
         await sabPause(s);
+        console.log('[Integrations][SABnzbd] pause applied');
         res.json({ ok: true });
     } catch (e) {
+        console.warn('[Integrations][SABnzbd] pause failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to pause SABnzbd.' });
     }
 });
@@ -3377,12 +3821,15 @@ app.post('/api/integrations/sabnzbd/pause', authenticateToken, async (req, res) 
 app.post('/api/integrations/sabnzbd/resume', authenticateToken, async (req, res) => {
     try {
         const { sabnzbd: s } = getGuiIntegrationConfig();
+        console.log('[Integrations][SABnzbd] resume request');
         if (!s.enabled) return res.status(400).json({ error: 'SABnzbd integration is disabled.' });
         if (!s.url) return res.status(400).json({ error: 'SABnzbd URL is not set.' });
         if (!s.apiKey) return res.status(400).json({ error: 'SABnzbd API key missing.' });
         await sabResume(s);
+        console.log('[Integrations][SABnzbd] resume applied');
         res.json({ ok: true });
     } catch (e) {
+        console.warn('[Integrations][SABnzbd] resume failed:', e.message);
         res.status(500).json({ ok: false, error: e.message || 'Failed to resume SABnzbd.' });
     }
 });

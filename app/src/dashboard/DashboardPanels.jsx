@@ -488,28 +488,6 @@ export function QbittorrentDashboardWidget({ addToast } = {}) {
           <button
             type="button"
             className="btn"
-            title="Sync qBittorrent listen port to forwarded port"
-            aria-label="Sync forwarded port"
-            disabled={busy}
-            onClick={() => run('/api/integrations/qbittorrent/sync-port-forward')}
-            style={{ padding: '8px 10px', minWidth: 0 }}
-          >
-            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>swap_horiz</span>
-          </button>
-          <button
-            type="button"
-            className="btn"
-            title="Bind qBittorrent to VPN interface (tun0)"
-            aria-label="Bind to VPN interface tun0"
-            disabled={busy}
-            onClick={() => run('/api/integrations/qbittorrent/bind-vpn', { net_interface: 'tun0', net_bind_ip: '' })}
-            style={{ padding: '8px 10px', minWidth: 0 }}
-          >
-            <span className="material-icons-round" style={{ fontSize: '18px', margin: 0 }}>vpn_lock</span>
-          </button>
-          <button
-            type="button"
-            className="btn"
             title="Apply safe defaults (anonymous mode, DHT/PEX/LSD off)"
             aria-label="Apply safe defaults"
             disabled={busy}

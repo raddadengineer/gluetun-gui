@@ -2,6 +2,11 @@ services:
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
+    restart: unless-stopped
+    # On container recreate, ensure Gluetun starts with the last saved VPN settings.
+    # The GUI will still update/recreate the container dynamically as needed.
+    env_file:
+      - ./data/gluetun.env
     cap_add:
       - NET_ADMIN
     devices:
@@ -10,9 +15,51 @@ services:
       - "8888:8888/tcp" # HTTP proxy
       - "8388:8388/tcp" # Shadowsocks
       - "8388:8388/udp" # Shadowsocks
+      - "8081:8081/tcp" # qBittorrent WebUI (published on gluetun)
     # NOTE: No env_file needed — the GUI manages Gluetun's
     # environment variables dynamically via Docker API.
     # On first run, set initial VPN config through the GUI (port 3000).
+    healthcheck:
+      # Healthy once tunnel interface appears (tun0 for OpenVPN, wg0 for WireGuard).
+      # This avoids relying on the control server, which may be disabled or auth-gated.
+      test: ["CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    entrypoint:
+      - /bin/sh
+      - -lc
+      - |
+        echo "[qbittorrent] waiting for Gluetun tunnel (wg0/tun0)..." >&2
+        # Robust detection: prefer ip link, fallback to /proc/net/dev.
+        while true; do
+          if ip link show tun0 >/dev/null 2>&1 || ip link show wg0 >/dev/null 2>&1; then
+            break
+          fi
+          if grep -qE '(tun0|wg0):' /proc/net/dev 2>/dev/null; then
+            break
+          fi
+          sleep 2
+        done
+        echo "[qbittorrent] tunnel detected; starting qBittorrent." >&2
+        exec /init
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/Chicago
+      - WEBUI_PORT=8081
+    volumes:
+      - ./data/qbittorrent-config:/config
+      - ./data/downloads:/downloads
+    restart: unless-stopped
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest

@@ -267,26 +267,6 @@ export default function Settings() {
     }
   }, [notify]);
 
-  const bindQbittorrentToVpn = useCallback(async () => {
-    setQbitBusy(true);
-    try {
-      const token = localStorage.getItem('token');
-      const res = await fetch('/api/integrations/qbittorrent/bind-vpn', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ net_interface: 'tun0', net_bind_ip: '' }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-      if (!data?.ok) throw new Error(data?.error || 'Failed to apply preferences');
-      notify({ level: 'success', title: 'qBittorrent', message: 'Applied: bind to tun0 (VPN interface).', source: 'settings', dedupeKey: 'qbit_bind_ok' });
-    } catch (e) {
-      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Bind failed', source: 'settings', dedupeKey: 'qbit_bind_fail' });
-    } finally {
-      setQbitBusy(false);
-    }
-  }, [notify]);
-
   const pauseAllQbittorrentTorrents = useCallback(async () => {
     setQbitBusy(true);
     try {
@@ -314,28 +294,6 @@ export default function Settings() {
       refreshQbittorrentDetails();
     } catch (e) {
       notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Resume failed', source: 'settings', dedupeKey: 'qbit_resume_fail' });
-    } finally {
-      setQbitBusy(false);
-    }
-  }, [notify, refreshQbittorrentDetails]);
-
-  const syncQbittorrentListeningPort = useCallback(async () => {
-    setQbitBusy(true);
-    try {
-      const token = localStorage.getItem('token');
-      const res = await fetch('/api/integrations/qbittorrent/sync-port-forward', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
-      notify({
-        level: 'success',
-        title: 'qBittorrent',
-        message: `Set qBittorrent listening port to forwarded port ${data.forwardedPort}.`,
-        source: 'settings',
-        dedupeKey: 'qbit_pf_ok',
-      });
-      refreshQbittorrentDetails();
-    } catch (e) {
-      notify({ level: 'error', title: 'qBittorrent', message: e.message || 'Sync failed', source: 'settings', dedupeKey: 'qbit_pf_fail' });
     } finally {
       setQbitBusy(false);
     }
@@ -2735,14 +2693,8 @@ export default function Settings() {
                         <button type="button" className="btn" disabled={qbitBusy} onClick={testQbittorrentIntegration} style={{ padding: '10px 14px' }}>
                           {qbitBusy ? 'Working…' : 'Test connection'}
                         </button>
-                        <button type="button" className="btn btn-primary" disabled={qbitBusy} onClick={bindQbittorrentToVpn} style={{ padding: '10px 14px' }}>
-                          Bind to VPN (tun0)
-                        </button>
                         <button type="button" className="btn" disabled={qbitBusy} onClick={applyQbittorrentSafeDefaults} style={{ padding: '10px 14px' }}>
                           Apply safe defaults
-                        </button>
-                        <button type="button" className="btn" disabled={qbitBusy} onClick={syncQbittorrentListeningPort} style={{ padding: '10px 14px' }}>
-                          Sync forwarded port
                         </button>
                         <button type="button" className="btn" disabled={qbitBusy} onClick={pauseAllQbittorrentTorrents} style={{ padding: '10px 14px' }}>
                           Pause all
@@ -2806,6 +2758,28 @@ export default function Settings() {
                           <span className="slider"></span>
                         </label>
                       </div>
+                    </div>
+
+                    <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '15px' }}>Auto-sync forwarded port</strong>
+                        <span>When VPN port forwarding changes, set qBittorrent listen port to match</span>
+                      </div>
+                      <label className="switch">
+                        <input type="checkbox" name="GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD" checked={config.GUI_QBITTORRENT_AUTO_SYNC_PORT_FORWARD === 'on'} onChange={handleChange} />
+                        <span className="slider"></span>
+                      </label>
+                    </div>
+
+                    <div style={{ marginTop: '12px' }} className="toggle-switch-container">
+                      <div className="toggle-info">
+                        <strong style={{ fontSize: '15px' }}>Auto-bind to VPN interface (tun0)</strong>
+                        <span>When enabled, the server keeps qBittorrent bound to the active tunnel interface (wg0/tun0)</span>
+                      </div>
+                      <label className="switch">
+                        <input type="checkbox" name="GUI_QBITTORRENT_AUTO_BIND_TUN0" checked={config.GUI_QBITTORRENT_AUTO_BIND_TUN0 === 'on'} onChange={handleChange} />
+                        <span className="slider"></span>
+                      </label>
                     </div>
 
                     <div style={{ marginTop: '12px' }} className="toggle-switch-container">
