@@ -17,12 +17,15 @@ export default function Logs() {
   const [levelFilters, setLevelFilters] = useState({ error: true, warning: true, info: true, debug: true, other: true });
   const [pausedCount, setPausedCount] = useState(0);
   const [newWhileNotFollowing, setNewWhileNotFollowing] = useState(0);
+  const [streamReconnecting, setStreamReconnecting] = useState(false);
   const isPausedRef = useRef(isPaused);
   const pausedBufferRef = useRef([]);
   const bottomRef = useRef(null);
   const logsContainerRef = useRef(null);
   const logsPageRef = useRef(null);
   const logAlertRef = useRef({ lastAt: 0, lastSnippet: '' });
+  const streamRetryRef = useRef(0);
+  const reconnectTimerRef = useRef(null);
 
   useEffect(() => { isPausedRef.current = isPaused; }, [isPaused]);
 
@@ -67,7 +70,6 @@ export default function Logs() {
   }, [notify]);
 
   useEffect(() => {
-    // Fetch initial log level
     const token = localStorage.getItem('token');
     fetch('/api/config', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
@@ -80,31 +82,76 @@ export default function Logs() {
       logStreamMode === 'live'
         ? `token=${encodeURIComponent(token)}&mode=live`
         : `token=${encodeURIComponent(token)}&tail=${encodeURIComponent(String(logTail))}`;
-    const eventSource = new EventSource(`/api/logs?${qs}`);
 
-    eventSource.onmessage = (event) => {
-      try {
-        const line = JSON.parse(event.data);
-        if (!line || String(line).trim() === '') return;
-        maybeNotifyLogAlert(line);
-        const row = parseLogLine(line);
-        if (isPausedRef.current) {
-          pausedBufferRef.current.push(row);
-          setPausedCount((c) => c + 1);
-          return;
-        }
-        setLogs((prev) => {
-          const next = [...prev, row];
-          if (next.length > 5000) return next.slice(next.length - 5000);
-          return next;
-        });
-      } catch {
-        // Fallback
+    let eventSource = null;
+    let closed = false;
+    streamRetryRef.current = 0;
+    setStreamReconnecting(false);
+
+    const appendLine = (line) => {
+      if (!line || String(line).trim() === '') return;
+      maybeNotifyLogAlert(line);
+      const row = parseLogLine(line);
+      if (isPausedRef.current) {
+        pausedBufferRef.current.push(row);
+        setPausedCount((c) => c + 1);
+        return;
       }
+      setLogs((prev) => {
+        const next = [...prev, row];
+        if (next.length > 5000) return next.slice(next.length - 5000);
+        return next;
+      });
     };
 
-    return () => eventSource.close();
-  }, [maybeNotifyLogAlert, logStreamMode, logTail, parseLogLine]);
+    const connect = () => {
+      if (closed) return;
+      eventSource = new EventSource(`/api/logs?${qs}`);
+
+      eventSource.onopen = () => {
+        streamRetryRef.current = 0;
+        setStreamReconnecting(false);
+      };
+
+      eventSource.onmessage = (event) => {
+        try {
+          appendLine(JSON.parse(event.data));
+        } catch {
+          // Fallback
+        }
+      };
+
+      eventSource.onerror = () => {
+        if (closed) return;
+        eventSource.close();
+        eventSource = null;
+        const attempt = streamRetryRef.current + 1;
+        streamRetryRef.current = attempt;
+        if (attempt > 12) {
+          setStreamReconnecting(false);
+          notify({
+            level: 'error',
+            title: 'Log stream disconnected',
+            message: 'Could not reconnect after multiple attempts. Refresh the page or change stream mode.',
+            source: 'logs',
+            dedupeKey: 'logs_stream_dead',
+          });
+          return;
+        }
+        setStreamReconnecting(true);
+        const delay = Math.min(30000, 1000 * (2 ** (attempt - 1)));
+        reconnectTimerRef.current = setTimeout(connect, delay);
+      };
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (eventSource) eventSource.close();
+    };
+  }, [maybeNotifyLogAlert, logStreamMode, logTail, parseLogLine, notify]);
 
   useEffect(() => {
     const el = logsContainerRef.current;
@@ -345,7 +392,27 @@ export default function Logs() {
         </div>
       </header>
 
-      <div style={{ 
+      {streamReconnecting && (
+        <div
+          role="status"
+          style={{
+            padding: '10px 16px',
+            borderRadius: '10px',
+            border: '1px solid var(--glass-border)',
+            background: 'var(--surface-2)',
+            color: 'var(--text-secondary)',
+            fontSize: '13px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+          }}
+        >
+          <span className="material-icons-round" style={{ fontSize: '18px', color: 'var(--accent-primary)' }}>sync</span>
+          Reconnecting to log stream…
+        </div>
+      )}
+
+      <div style={{
         display: 'flex', gap: '20px', alignItems: 'center', flexWrap: 'wrap',
         background: 'var(--glass-bg)', padding: '12px 20px', borderRadius: '12px', 
         border: '1px solid var(--glass-border)' 

@@ -212,6 +212,7 @@ export default function Settings() {
   const [engineStatus, setEngineStatus] = useState(null);
   const [engineStatusLoading, setEngineStatusLoading] = useState(false);
   const [engineStatusErr, setEngineStatusErr] = useState(null);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [qbitBusy, setQbitBusy] = useState(false);
   const [qbitDetails, setQbitDetails] = useState(null);
   const [sabBusy, setSabBusy] = useState(false);
@@ -425,6 +426,30 @@ export default function Settings() {
   useEffect(() => {
     refreshHomelabBackups();
   }, [refreshHomelabBackups]);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const pollLifecycle = async (signal) => {
+      try {
+        const res = await fetch('/api/status', {
+          headers: { Authorization: `Bearer ${token}` },
+          signal,
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setLifecycleBusy(data?.lifecycle?.busy === true);
+      } catch (err) {
+        if (err?.name === 'AbortError') return;
+      }
+    };
+    const controller = new AbortController();
+    pollLifecycle(controller.signal);
+    const id = setInterval(() => pollLifecycle(controller.signal), 5000);
+    return () => {
+      controller.abort();
+      clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     if (activeTab === 'application' && appSubTab === 'data') refreshHomelabBackups();
@@ -1264,9 +1289,9 @@ export default function Settings() {
           </div>
         </header>
 
-        <button type="button" onClick={handleSave} className="btn btn-primary" disabled={saving}>
+        <button type="button" onClick={handleSave} className="btn btn-primary" disabled={saving || lifecycleBusy}>
           <span className="material-icons-round">save</span>
-          {saving ? 'Saving...' : 'Save All Changes'}
+          {lifecycleBusy ? 'Container busy…' : saving ? 'Saving...' : 'Save All Changes'}
         </button>
       </div>
 
@@ -1824,6 +1849,7 @@ export default function Settings() {
                         type="button" onClick={handleSave}
                         disabled={
                           saving ||
+                          lifecycleBusy ||
                           piaOpenVpnRegionsList.length === 0 ||
                           !(String(config.OPENVPN_USER || '').trim() || String(piaUsername || '').trim()) ||
                           !(String(config.OPENVPN_PASSWORD || '').trim() || String(piaPassword || '').trim())
@@ -3873,14 +3899,14 @@ export default function Settings() {
             <p style={{ flex: '1 1 220px', margin: 0, fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
               Applies all tabs, then recreates Gluetun. <strong style={{ fontWeight: 600 }}>Save &amp; connect</strong> runs an outbound VPN check after a successful save (same as Dashboard → Test VPN connectivity).
             </p>
-            <button type="button" className="btn" disabled={saving} onClick={(e) => handleSave(e)}>
+            <button type="button" className="btn" disabled={saving || lifecycleBusy} onClick={(e) => handleSave(e)}>
               <span className="material-icons-round">save</span>
-              {saving ? 'Saving…' : 'Save all changes'}
+              {lifecycleBusy ? 'Container busy…' : saving ? 'Saving…' : 'Save all changes'}
             </button>
             <button
               type="button"
               className="btn btn-primary"
-              disabled={saving}
+              disabled={saving || lifecycleBusy}
               onClick={(e) => handleSaveAndConnect(e)}
               style={{ background: 'var(--success)', boxShadow: '0 4px 14px rgba(16,185,129,0.25)' }}
             >
@@ -3947,8 +3973,8 @@ export default function Settings() {
               <button type="button" className="btn" disabled={saving} onClick={() => setSaveDiffModal({ open: false, changes: [], pending: null, runVpnProbeAfter: false })}>
                 Cancel
               </button>
-              <button type="button" className="btn btn-primary" disabled={saving} onClick={confirmSaveAfterDiff}>
-                {saving ? 'Saving…' : (saveDiffModal.runVpnProbeAfter ? 'Save, apply & test VPN' : 'Save & apply')}
+              <button type="button" className="btn btn-primary" disabled={saving || lifecycleBusy} onClick={confirmSaveAfterDiff}>
+                {lifecycleBusy ? 'Container busy…' : saving ? 'Saving…' : (saveDiffModal.runVpnProbeAfter ? 'Save, apply & test VPN' : 'Save & apply')}
               </button>
             </div>
           </div>
