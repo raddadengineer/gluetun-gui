@@ -126,11 +126,11 @@ export default function Network() {
   }, []);
 
   // ─── Fetch live metrics ──────────────────────────────────────────────────────
-  const fetchMetrics = useCallback(async () => {
+  const fetchMetrics = useCallback(async (signal) => {
     try {
       const token = localStorage.getItem('token');
-      const res = await fetch('/api/metrics', { headers: { 'Authorization': `Bearer ${token}` } });
-      if (!res.ok) return;
+      const res = await fetch('/api/metrics', { headers: { 'Authorization': `Bearer ${token}` }, signal });
+      if (signal?.aborted || !res.ok) return;
       const stats = await res.json();
       if (!stats.networks) return;
 
@@ -177,7 +177,10 @@ export default function Network() {
       });
       setHistory(h => [...h, point].slice(-(prefs.historyMax || DEFAULT_PREFS.historyMax)));
       setLastUpdatedAt(new Date().toISOString());
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      console.error(e);
+    }
   }, [prefs.historyMax]);
 
   const resetPeaks = useCallback(() => setPeaks({}), []);
@@ -249,10 +252,14 @@ export default function Network() {
   };
 
   useEffect(() => {
-    if (paused) return;
-    fetchMetrics();
-    const iv = setInterval(fetchMetrics, Math.max(500, Number(prefs.refreshMs) || DEFAULT_PREFS.refreshMs));
-    return () => clearInterval(iv);
+    if (paused) return undefined;
+    const controller = new AbortController();
+    fetchMetrics(controller.signal);
+    const iv = setInterval(() => fetchMetrics(controller.signal), Math.max(500, Number(prefs.refreshMs) || DEFAULT_PREFS.refreshMs));
+    return () => {
+      controller.abort();
+      clearInterval(iv);
+    };
   }, [fetchMetrics, paused, prefs.refreshMs]);
 
   useEffect(() => {

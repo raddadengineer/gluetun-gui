@@ -43,6 +43,10 @@ export default function Dashboard() {
   const netPrevRef = useRef({ rx: 0, tx: 0, time: Date.now() });
   const [netHistory, setNetHistory] = useState([]);
   const piaMonitorNotifySig = useRef('');
+  const pollAbortRef = useRef(null);
+
+  const lifecycleBusy = status?.lifecycle?.busy === true;
+  const actionBusy = loading || lifecycleBusy;
 
   const formatBytes = (bytes, decimals = 1) => {
     if (!+bytes) return '0 B';
@@ -53,12 +57,14 @@ export default function Dashboard() {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
   };
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async (signal) => {
     try {
       const token = localStorage.getItem('token');
       const res = await fetch('/api/status', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal,
       });
+      if (signal?.aborted) return;
       if (res.ok) {
         const data = await res.json();
         const envMap = {};
@@ -73,21 +79,23 @@ export default function Dashboard() {
       } else {
         setStatus({ error: true });
       }
-    } catch {
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
       setStatus({ error: true });
     } finally {
-      setLoading(false);
+      if (!signal?.aborted) setLoading(false);
     }
-  };
+  }, []);
 
-  const fetchMetrics = async () => {
+  const fetchMetrics = useCallback(async (signal) => {
     try {
       const token = localStorage.getItem('token');
       const res = await fetch('/api/metrics', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal,
       });
-      if (res.ok) {
-        const stats = await res.json();
+      if (signal?.aborted || !res.ok) return;
+      const stats = await res.json();
 
         let cpuPercent = 0;
         if (stats.cpu_stats && stats.precpu_stats) {
@@ -140,25 +148,27 @@ export default function Dashboard() {
           const newHist = [...prevHist, histItem];
           return newHist.slice(Math.max(newHist.length - 15, 0));
         });
-      }
     } catch (err) {
+      if (err?.name === 'AbortError') return;
       console.error("Error fetching metrics", err);
     }
-  };
+  }, []);
 
-  const fetchPiaMonitoring = async () => {
+  const fetchPiaMonitoring = useCallback(async (signal) => {
     try {
       const token = localStorage.getItem('token');
       const res = await fetch('/api/pia/monitoring', {
-        headers: { 'Authorization': `Bearer ${token}` }
+        headers: { 'Authorization': `Bearer ${token}` },
+        signal,
       });
-      if (!res.ok) return;
+      if (signal?.aborted || !res.ok) return;
       const data = await res.json();
       setPiaMonitoring(data);
-    } catch {
+    } catch (err) {
+      if (err?.name === 'AbortError') return;
       // silent
     }
-  };
+  }, []);
 
   // Notifications from monitoring — only when meaningful fields change (poll returns new object each time)
   useEffect(() => {
@@ -195,18 +205,23 @@ export default function Dashboard() {
   }, [notify, piaMonitoring]);
 
   useEffect(() => {
-    fetchStatus();
-    fetchMetrics();
-    fetchPiaMonitoring();
-    const statusInterval = setInterval(fetchStatus, 3000);
-    const metricsInterval = setInterval(fetchMetrics, 1500);
-    const piaMonInterval = setInterval(fetchPiaMonitoring, 10000);
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+    const signal = controller.signal;
+
+    fetchStatus(signal);
+    fetchMetrics(signal);
+    fetchPiaMonitoring(signal);
+    const statusInterval = setInterval(() => fetchStatus(signal), 3000);
+    const metricsInterval = setInterval(() => fetchMetrics(signal), 3000);
+    const piaMonInterval = setInterval(() => fetchPiaMonitoring(signal), 10000);
     return () => {
+      controller.abort();
       clearInterval(statusInterval);
       clearInterval(metricsInterval);
       clearInterval(piaMonInterval);
     };
-  }, []);
+  }, [fetchStatus, fetchMetrics, fetchPiaMonitoring]);
 
   const toggleSetting = useCallback(async (key, currentValue) => {
     setLoading(true);
@@ -256,9 +271,10 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [notify]);
+  }, [notify, fetchStatus]);
 
   const handleRestart = async () => {
+    if (lifecycleBusy) return;
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -276,11 +292,13 @@ export default function Dashboard() {
     } catch (e) {
       console.error(e);
       notify({ level: 'error', title: 'Restart failed', message: e.message, source: 'dashboard', dedupeKey: 'gluetun_restart_exc' });
+    } finally {
       setLoading(false);
     }
   };
 
   const handleStop = async () => {
+    if (lifecycleBusy) return;
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -298,6 +316,7 @@ export default function Dashboard() {
     } catch (e) {
       console.error(e);
       notify({ level: 'error', title: 'Stop failed', message: e.message, source: 'dashboard', dedupeKey: 'gluetun_stop_exc' });
+    } finally {
       setLoading(false);
     }
   };
@@ -343,6 +362,7 @@ export default function Dashboard() {
   };
 
   const handleTestFailover = async () => {
+    if (lifecycleBusy) return;
     setLoading(true);
     try {
       const token = localStorage.getItem('token');
@@ -508,21 +528,21 @@ export default function Dashboard() {
                   Widgets
                 </button>
                 <div className="dropdown-menu-divider" role="separator" />
-                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleRestart(); }} disabled={loading}>
+                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleRestart(); }} disabled={loading || lifecycleBusy}>
                   <span className="material-icons-round" style={{ fontSize: '18px' }}>autorenew</span>
-                  {loading ? 'Waiting...' : 'Restart Engine'}
+                  {lifecycleBusy ? 'Container busy…' : loading ? 'Waiting...' : 'Restart Engine'}
                 </button>
-                <button type="button" className="dropdown-item" onClick={() => { handleConnectivityTest(); }} disabled={loading || vpnTestBusy}>
+                <button type="button" className="dropdown-item" onClick={() => { handleConnectivityTest(); }} disabled={loading || vpnTestBusy || lifecycleBusy}>
                   <span className="material-icons-round" style={{ fontSize: '18px' }}>network_ping</span>
                   {vpnTestBusy ? 'Testing…' : 'Test VPN connectivity'}
                 </button>
-                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleTestFailover(); }} disabled={loading}>
+                <button type="button" className="dropdown-item" onClick={() => { setMenuOpen(false); handleTestFailover(); }} disabled={loading || lifecycleBusy}>
                   <span className="material-icons-round" style={{ fontSize: '18px' }}>rotate_right</span>
-                  {loading ? 'Waiting...' : 'Test Auto-Failover'}
+                  {lifecycleBusy ? 'Container busy…' : loading ? 'Waiting...' : 'Test Auto-Failover'}
                 </button>
-                <button type="button" className="dropdown-item danger" onClick={() => { setMenuOpen(false); handleStop(); }} disabled={loading}>
+                <button type="button" className="dropdown-item danger" onClick={() => { setMenuOpen(false); handleStop(); }} disabled={loading || lifecycleBusy}>
                   <span className="material-icons-round" style={{ fontSize: '18px' }}>power_settings_new</span>
-                  {loading ? 'Waiting...' : 'Kill VPN'}
+                  {lifecycleBusy ? 'Container busy…' : loading ? 'Waiting...' : 'Kill VPN'}
                 </button>
               </div>
             )}

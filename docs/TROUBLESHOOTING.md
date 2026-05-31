@@ -72,6 +72,10 @@ the runtime environment likely lacks system root CAs (Alpine: install `ca-certif
 
 - **Diff modal never completes:** check browser console and **`docker compose logs gluetun-gui`** for API errors.
 - **Docker API errors during recreate:** disk full, image pull failures, or port conflicts on the host can block `createContainer`. Inspect **`docker compose logs gluetun`** and **`gluetun-gui`**.
+- **Recreate failed / rollback attempted:** before each recreate the GUI writes a snapshot to **`data/recreate-backup.json`**. If the new container fails to start, the server tries to restore the previous container from that snapshot. Check **`docker compose logs gluetun-gui`** for `[Recreate]` lines; if rollback also fails, run **`docker compose up -d gluetun`** manually.
+- **409 Container operation in progress:** another save, failover, or restart is already running. Wait for it to finish (Dashboard shows a busy state) and retry.
+- **409 "Container operation in progress":** another save, failover, restart, or recreate is already running. Wait for it to finish (Dashboard buttons show "Waiting…" while busy) and retry.
+- **Recreate failed with rollback:** before each recreate the GUI writes **`data/recreate-backup.json`** (inspect snapshot). If the new container fails to start, the server attempts to restore the previous container from that snapshot. Check **`docker compose logs gluetun-gui`** for `[Recreate]` lines; if rollback also fails, run **`docker compose up -d gluetun`** manually.
 
 ## Still stuck
 

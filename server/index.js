@@ -148,9 +148,139 @@ const HOMELAB_STATE_PATH = DATA_DIR
 const CONFIG_DIFF_HISTORY_PATH = DATA_DIR
     ? path.join(DATA_DIR, 'config-diff-history.json')
     : path.join(__dirname, 'config-diff-history.json');
+const RECREATE_BACKUP_PATH = DATA_DIR
+    ? path.join(DATA_DIR, 'recreate-backup.json')
+    : path.join(__dirname, 'recreate-backup.json');
 if (DATA_DIR && !fs.existsSync(WG_CONFIG_DIR)) {
     fs.mkdirSync(WG_CONFIG_DIR, { recursive: true });
 }
+
+/** Write file atomically via temp + rename to avoid truncated config on crash. */
+function writeFileAtomic(filePath, content) {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+    try {
+        fs.writeFileSync(tmpPath, content, 'utf8');
+        const fd = fs.openSync(tmpPath, 'r');
+        fs.fsyncSync(fd);
+        fs.closeSync(fd);
+        fs.renameSync(tmpPath, filePath);
+    } catch (e) {
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        throw e;
+    }
+}
+
+function cleanupOrphanedTempFiles() {
+    const dirs = [DATA_DIR, path.dirname(ENV_PATH), path.dirname(SESSIONS_PATH)].filter(Boolean);
+    for (const dir of dirs) {
+        try {
+            if (!dir || !fs.existsSync(dir)) continue;
+            for (const name of fs.readdirSync(dir)) {
+                if (!name.includes('.tmp.')) continue;
+                const full = path.join(dir, name);
+                try {
+                    fs.unlinkSync(full);
+                    console.log('[Init] Removed orphaned temp file:', name);
+                } catch { /* ignore */ }
+            }
+        } catch { /* ignore */ }
+    }
+}
+
+// ─── Container lifecycle mutex ────────────────────────────────────────────────
+let lifecycleChain = Promise.resolve();
+let lifecycleDepth = 0;
+let lifecycleBusy = false;
+let lifecycleOperation = null;
+
+function getLifecycleState() {
+    return { busy: lifecycleBusy, operation: lifecycleOperation };
+}
+
+function withLifecycleLock(operation, mode, fn) {
+    if (lifecycleDepth > 0) {
+        return fn();
+    }
+
+    const run = async () => {
+        lifecycleDepth += 1;
+        lifecycleBusy = true;
+        lifecycleOperation = operation;
+        try {
+            return await fn();
+        } finally {
+            lifecycleDepth -= 1;
+            if (lifecycleDepth <= 0) {
+                lifecycleDepth = 0;
+                lifecycleBusy = false;
+                lifecycleOperation = null;
+            }
+        }
+    };
+
+    if (lifecycleBusy && mode === 'reject') {
+        const err = new Error('Container operation in progress');
+        err.code = 'LIFECYCLE_BUSY';
+        return Promise.reject(err);
+    }
+
+    const result = lifecycleChain.then(run, run);
+    lifecycleChain = result.then(() => {}, () => {});
+    return result;
+}
+
+async function waitForContainerRunning(containerId, timeoutMs = 15000) {
+    if (!containerId) return false;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        try {
+            const info = await docker.getContainer(containerId).inspect();
+            if (info?.State?.Status === 'running') return true;
+        } catch { /* retry */ }
+        await new Promise((r) => setTimeout(r, 500));
+    }
+    return false;
+}
+
+function clearRecreateBackup() {
+    try {
+        if (fs.existsSync(RECREATE_BACKUP_PATH)) fs.unlinkSync(RECREATE_BACKUP_PATH);
+    } catch (e) {
+        console.warn('[Recreate] Failed to clear backup:', e.message);
+    }
+}
+
+async function attemptRecreateRollback(backup, reason) {
+    if (!backup?.inspectData) throw new Error('no backup available');
+    const inspectData = backup.inspectData;
+    const oldConfig = inspectData.Config;
+    const hostConfig = inspectData.HostConfig;
+    const name = String(inspectData.Name || '').replace(/^\//, '') || 'gluetun';
+
+    console.error(`[Recreate] Attempting rollback after failure: ${reason}`);
+    const createOpts = {
+        name,
+        Image: oldConfig.Image,
+        Env: oldConfig.Env,
+        ExposedPorts: oldConfig.ExposedPorts,
+        HostConfig: { ...hostConfig },
+        Labels: oldConfig.Labels,
+        Cmd: oldConfig.Cmd,
+        Entrypoint: oldConfig.Entrypoint,
+        WorkingDir: oldConfig.WorkingDir,
+        User: oldConfig.User,
+    };
+    const rolled = await docker.createContainer(createOpts);
+    await rolled.start();
+    const running = await waitForContainerRunning(rolled.id, 20000);
+    if (!running) throw new Error('rollback container did not reach running state');
+    console.log('[Recreate] Rollback container started successfully.');
+    return 'restored previous container configuration';
+}
+
+cleanupOrphanedTempFiles();
 
 // Migrate legacy files into DATA_DIR if they exist
 if (DATA_DIR) {
@@ -196,7 +326,7 @@ function loadSessions() {
 
 function saveSessions() {
     try {
-        fs.writeFileSync(SESSIONS_PATH, JSON.stringify(sessions, null, 2), 'utf8');
+        writeFileAtomic(SESSIONS_PATH, JSON.stringify(sessions, null, 2));
     } catch (e) {
         console.error('[Sessions] Failed to save sessions.json:', e.message);
     }
@@ -235,65 +365,86 @@ function startNewSession(containerId, startedAt, envVars) {
     console.log(`[Sessions] New session started: ${currentSession.id}`);
 }
 
-async function updateCurrentSession(networks) {
-    if (!currentSession) return;
-    
-    if (networks) {
-        const ifaces = Object.keys(networks);
-        ifaces.forEach(iface => {
-            const net = networks[iface];
-            if (!sessionBaselines[iface]) {
-                sessionBaselines[iface] = { rx: net.rx_bytes, tx: net.tx_bytes };
-            }
-            const rxDelta = Math.max(0, net.rx_bytes - sessionBaselines[iface].rx);
-            const txDelta = Math.max(0, net.tx_bytes - sessionBaselines[iface].tx);
-            currentSession.interfaces[iface] = { rx: rxDelta, tx: txDelta };
-        });
-    }
+function updateCurrentSessionBandwidth(networks) {
+    if (!currentSession || !networks) return;
 
-    if (!currentSession.publicIp || !currentSession.serverIp || currentSession.location === 'auto') {
-        try {
-            const containers = await docker.listContainers({ all: true });
-            const gluetun = findGluetunEngineContainer(containers);
-            if (gluetun) {
-                let logs = '';
-                try {
-                    const logsStream = await docker.getContainer(gluetun.Id).logs({ follow: false, stdout: true, stderr: true, tail: 300 });
-                    logs = logsStream.toString('utf8');
-                } catch (e) {
-                    // Container can be recreated between list and logs; ignore expected 404 race.
-                    if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
-                    throw e;
-                }
-                
-                const serverMatches = logs.match(/Connecting to ([\d\.]+)/g);
-                if (serverMatches) {
-                    const lastServer = serverMatches[serverMatches.length - 1];
-                    currentSession.serverIp = lastServer.match(/Connecting to ([\d\.]+)/)[1];
-                }
-                
-                const ipMatches = logs.match(/Public IP address is ([\d\.]+) \((.*?)\s*-\s*source:/g);
-                if (ipMatches) {
-                    const lastIpLog = ipMatches[ipMatches.length - 1];
-                    const ipExtracted = lastIpLog.match(/Public IP address is ([\d\.]+) \((.*?)\s*-\s*source:/);
-                    if (ipExtracted) {
-                        currentSession.publicIp = ipExtracted[1];
-                        currentSession.location = ipExtracted[2].trim();
-                    }
-                }
-            }
-        } catch (e) {
-            if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
-            console.error('[Sessions] Error parsing gluetun logs:', e.message);
+    const ifaces = Object.keys(networks);
+    ifaces.forEach((iface) => {
+        const net = networks[iface];
+        if (!sessionBaselines[iface]) {
+            sessionBaselines[iface] = { rx: net.rx_bytes, tx: net.tx_bytes };
         }
-    }
+        const rxDelta = Math.max(0, net.rx_bytes - sessionBaselines[iface].rx);
+        const txDelta = Math.max(0, net.tx_bytes - sessionBaselines[iface].tx);
+        currentSession.interfaces[iface] = { rx: rxDelta, tx: txDelta };
+    });
 
-    // Throttle saves: only write every ~30s
     const now = Date.now();
     if (!currentSession._lastSave || now - currentSession._lastSave > 30000) {
         currentSession._lastSave = now;
         saveSessions();
     }
+}
+
+let lastSessionIpEnrichmentAt = 0;
+let sessionIpEnrichmentInFlight = false;
+const SESSION_IP_ENRICHMENT_INTERVAL_MS = 30000;
+
+async function enrichCurrentSessionFromLogs(force = false) {
+    if (!currentSession) return;
+    if (sessionIpEnrichmentInFlight) return;
+
+    const now = Date.now();
+    if (!force && now - lastSessionIpEnrichmentAt < SESSION_IP_ENRICHMENT_INTERVAL_MS) return;
+    if (!force && currentSession.publicIp && currentSession.serverIp && currentSession.location !== 'auto') return;
+
+    sessionIpEnrichmentInFlight = true;
+    lastSessionIpEnrichmentAt = now;
+    try {
+        const containers = await docker.listContainers({ all: true });
+        const gluetun = findGluetunEngineContainer(containers);
+        if (!gluetun) return;
+
+        let logs = '';
+        try {
+            const logsStream = await docker.getContainer(gluetun.Id).logs({ follow: false, stdout: true, stderr: true, tail: 300 });
+            logs = logsStream.toString('utf8');
+        } catch (e) {
+            if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
+            throw e;
+        }
+
+        const serverMatches = logs.match(/Connecting to ([\d\.]+)/g);
+        if (serverMatches) {
+            const lastServer = serverMatches[serverMatches.length - 1];
+            currentSession.serverIp = lastServer.match(/Connecting to ([\d\.]+)/)[1];
+        }
+
+        const ipMatches = logs.match(/Public IP address is ([\d\.]+) \((.*?)\s*-\s*source:/g);
+        if (ipMatches) {
+            const lastIpLog = ipMatches[ipMatches.length - 1];
+            const ipExtracted = lastIpLog.match(/Public IP address is ([\d\.]+) \((.*?)\s*-\s*source:/);
+            if (ipExtracted) {
+                currentSession.publicIp = ipExtracted[1];
+                currentSession.location = ipExtracted[2].trim();
+            }
+        }
+
+        saveSessions();
+    } catch (e) {
+        if ((e.message || '').includes('no such container') || e.statusCode === 404) return;
+        console.error('[Sessions] Error parsing gluetun logs:', e.message);
+    } finally {
+        sessionIpEnrichmentInFlight = false;
+    }
+}
+
+function scheduleSessionIpEnrichment(force = false) {
+    setTimeout(() => {
+        enrichCurrentSessionFromLogs(force).catch((e) => {
+            console.error('[Sessions] IP enrichment failed:', e.message);
+        });
+    }, force ? 2000 : 0);
 }
 
 // Load persisted sessions on startup
@@ -422,6 +573,7 @@ app.get('/api/status', authenticateToken, async (req, res) => {
             lastVpnConnectivityCheck,
             imageUpdate,
             homelab: loadHomelabState(),
+            lifecycle: getLifecycleState(),
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -471,8 +623,8 @@ app.get('/api/metrics', authenticateToken, async (req, res) => {
             // ignore enrichment errors; base docker stats will still work
         }
 
-        // Update session bandwidth accounting with per-interface data and IP checking
-        await updateCurrentSession(stats.networks);
+        // Bandwidth accounting only — IP enrichment runs on a throttled background task.
+        updateCurrentSessionBandwidth(stats.networks);
 
         res.json(stats);
     } catch (err) {
@@ -506,35 +658,46 @@ app.delete('/api/sessions', authenticateToken, (req, res) => {
 
 app.post('/api/restart', authenticateToken, async (req, res) => {
     try {
-        const containers = await docker.listContainers({ all: true });
-        const gluetun = containers.find(c => c.Names.some(n => n.includes('gluetun')));
+        await withLifecycleLock('restart', 'queue', async () => {
+            const containers = await docker.listContainers({ all: true });
+            const gluetun = findGluetunEngineContainer(containers);
 
-        if (!gluetun) {
-            return res.status(404).json({ error: 'Gluetun container not found' });
-        }
+            if (!gluetun) {
+                const err = new Error('Gluetun container not found');
+                err.statusCode = 404;
+                throw err;
+            }
 
-        const container = docker.getContainer(gluetun.Id);
-        await container.restart();
+            const container = docker.getContainer(gluetun.Id);
+            await container.restart();
+        });
+        scheduleSessionIpEnrichment(true);
         res.json({ message: 'Gluetun restarted successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        const status = err.statusCode || (err.code === 'LIFECYCLE_BUSY' ? 409 : 500);
+        res.status(status).json({ error: err.message });
     }
 });
 
 app.post('/api/stop', authenticateToken, async (req, res) => {
     try {
-        const containers = await docker.listContainers({ all: true });
-        const gluetun = containers.find(c => c.Names.some(n => n.includes('gluetun')));
+        await withLifecycleLock('stop', 'queue', async () => {
+            const containers = await docker.listContainers({ all: true });
+            const gluetun = findGluetunEngineContainer(containers);
 
-        if (!gluetun) {
-            return res.status(404).json({ error: 'Gluetun container not found' });
-        }
+            if (!gluetun) {
+                const err = new Error('Gluetun container not found');
+                err.statusCode = 404;
+                throw err;
+            }
 
-        const container = docker.getContainer(gluetun.Id);
-        await container.stop();
+            const container = docker.getContainer(gluetun.Id);
+            await container.stop();
+        });
         res.json({ message: 'Gluetun stopped successfully' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        const status = err.statusCode || (err.code === 'LIFECYCLE_BUSY' ? 409 : 500);
+        res.status(status).json({ error: err.message });
     }
 });
 
@@ -595,159 +758,207 @@ app.get('/api/logs', authenticateToken, async (req, res) => {
     }
 });
 
-async function recreateGluetunContainer(newEnvObj) {
+async function recreateGluetunContainerCore(newEnvObj) {
     // Write the flat gluetun.env backup file
     const envLines = Object.entries(newEnvObj)
         .filter(([_, v]) => v !== undefined && v !== null && v.toString().trim() !== '' && v !== 'undefined')
         .map(([k, v]) => `${k}=${v}`);
-    fs.writeFileSync(GLUETUN_ENV_PATH, envLines.join('\n') + '\n', 'utf8');
+    writeFileAtomic(GLUETUN_ENV_PATH, envLines.join('\n') + '\n');
 
     // Recreate container via Dockerode
     const containers = await docker.listContainers({ all: true });
     const gluetunInfo = findGluetunEngineContainer(containers);
 
-    if (gluetunInfo) {
-        const oldContainer = docker.getContainer(gluetunInfo.Id);
-        const inspectData = await oldContainer.inspect().catch(() => null);
-        if (!inspectData) return 'Container inspect failed';
-        const oldGluetunId = gluetunInfo.Id;
-        const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
-
-        await oldContainer.stop().catch(() => {});
-        await oldContainer.remove().catch(() => {});
-
-        const oldConfig = inspectData.Config;
-        const hostConfig = inspectData.HostConfig;
-
-        // Keep non-overlapping env vars from old container, add new ones
-        const keysToReplace = new Set(Object.keys(newEnvObj));
-        let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
-
-        // Drop server params from old config if they were not explicitly passed in the new config
-        // NOTE: SERVER_NAMES is preserved if passed in newEnvObj to support PIA custom port forwarding
-        const serverParams = ['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES'];
-        serverParams.forEach(k => {
-            if (!newEnvObj[k]) filteredOldEnv = filteredOldEnv.filter(e => e.split('=')[0] !== k);
-        });
-        if (!newEnvObj['SERVER_NAMES']) {
-            filteredOldEnv = filteredOldEnv.filter(e => e.split('=')[0] !== 'SERVER_NAMES');
-        }
-
-        // Drop irrelevant protocol parameters
-        if (newEnvObj.VPN_TYPE === 'wireguard') {
-            filteredOldEnv = filteredOldEnv.filter(e => !e.split('=')[0].startsWith('OPENVPN_'));
-        } else if (newEnvObj.VPN_TYPE === 'openvpn') {
-            filteredOldEnv = filteredOldEnv.filter(e => !e.split('=')[0].startsWith('WIREGUARD_'));
-        }
-
-        // Drop legacy mullvad and prep GODEBUG for old Go CN certificate support
-        filteredOldEnv = filteredOldEnv.map(e => {
-            if (e.startsWith('DNS_UPSTREAM_RESOLVERS=') || e.startsWith('DOT_PROVIDERS=')) {
-                return e.split('=')[0] + '=' + e.split('=')[1].split(',').map(s => s.trim().toLowerCase() === 'mullvad' ? 'quad9' : s).join(',');
-            }
-            return e;
-        }).filter(e => !e.startsWith('GODEBUG='));
-
-        const mergedEnv = [...filteredOldEnv, ...envLines, 'GODEBUG=x509ignoreCN=0'];
-
-        const createOpts = {
-            name: inspectData.Name.replace(/^\//, ''),
-            Image: oldConfig.Image,
-            Env: mergedEnv,
-            ExposedPorts: oldConfig.ExposedPorts,
-            HostConfig: {
-                ...hostConfig,
-            },
-            Labels: oldConfig.Labels,
-        };
-
-        const newContainer = await docker.createContainer(createOpts);
-        await newContainer.start();
-        const newGluetunId = newContainer?.id || (await newContainer.inspect().then(i => i.Id).catch(() => null));
-
-        // If Gluetun is recreated, any containers sharing its network namespace (container:<oldId>)
-        // must also be recreated to attach to the new namespace; restart is not enough.
-        try {
-            const all = await docker.listContainers({ all: true });
-            for (const c of all) {
-                if (!c?.Id || c.Id === oldGluetunId) continue;
-                const cont = docker.getContainer(c.Id);
-                const i = await cont.inspect().catch(() => null);
-                const nm = i?.HostConfig?.NetworkMode || '';
-                const isOldNetns =
-                    nm === `container:${oldGluetunId}` ||
-                    nm === `container:${oldGluetunName}` ||
-                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)));
-                if (!isOldNetns) continue;
-                const name = (i?.Name || '').replace(/^\//, '');
-                console.log(`[Startup] Recreating dependent container "${name}" to follow new Gluetun netns.`);
-                await cont.stop().catch(() => {});
-                await cont.remove().catch(() => {});
-
-                const newHostConfig = { ...(i.HostConfig || {}) };
-                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
-                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
-
-                const create = {
-                    name,
-                    Image: i.Config.Image,
-                    Env: i.Config.Env,
-                    Cmd: i.Config.Cmd,
-                    Entrypoint: i.Config.Entrypoint,
-                    WorkingDir: i.Config.WorkingDir,
-                    User: i.Config.User,
-                    Labels: i.Config.Labels,
-                    HostConfig: finalHostConfig,
-                };
-                const nc = await docker.createContainer(create);
-                await nc.start();
-            }
-
-            // Safety net: if we recreated Gluetun, also recreate known client containers that might be pinned
-            // to the previous network namespace even when Docker reports a name-based network mode.
-            const pinnedClientNames = new Set(['qbittorrent', 'sabnzbd']);
-            for (const c of all) {
-                if (!c?.Id || c.Id === oldGluetunId) continue;
-                const cont = docker.getContainer(c.Id);
-                const i = await cont.inspect().catch(() => null);
-                const name = (i?.Name || '').replace(/^\//, '');
-                if (!pinnedClientNames.has(name)) continue;
-                const nm = i?.HostConfig?.NetworkMode || '';
-                if (!String(nm).startsWith('container:')) continue;
-                // Already handled by the loop above
-                if (
-                    nm === `container:${oldGluetunId}` ||
-                    nm === `container:${oldGluetunName}` ||
-                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)))
-                ) {
-                    continue;
-                }
-                console.log(`[Startup] Recreating pinned client "${name}" to ensure it follows Gluetun netns.`);
-                await cont.stop().catch(() => {});
-                await cont.remove().catch(() => {});
-                const newHostConfig = { ...(i.HostConfig || {}) };
-                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
-                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
-                const create = {
-                    name,
-                    Image: i.Config.Image,
-                    Env: i.Config.Env,
-                    Cmd: i.Config.Cmd,
-                    Entrypoint: i.Config.Entrypoint,
-                    WorkingDir: i.Config.WorkingDir,
-                    User: i.Config.User,
-                    Labels: i.Config.Labels,
-                    HostConfig: finalHostConfig,
-                };
-                const nc = await docker.createContainer(create);
-                await nc.start();
-            }
-        } catch (e) {
-            console.warn('[Startup] Dependent netns recreate skipped:', e.message);
-        }
-        return 'Gluetun recreated successfully.';
+    if (!gluetunInfo) {
+        return 'Gluetun container not found. Restart via docker-compose required.';
     }
-    return 'Gluetun container not found. Restart via docker-compose required.';
+
+    const oldContainer = docker.getContainer(gluetunInfo.Id);
+    const inspectData = await oldContainer.inspect().catch(() => null);
+    if (!inspectData) return 'Container inspect failed';
+
+    const backupPayload = {
+        inspectData,
+        newEnvObj,
+        envLines,
+        savedAt: new Date().toISOString(),
+    };
+    try {
+        writeFileAtomic(RECREATE_BACKUP_PATH, JSON.stringify(backupPayload));
+    } catch (e) {
+        console.warn('[Recreate] Failed to persist backup snapshot:', e.message);
+    }
+
+    const oldGluetunId = gluetunInfo.Id;
+    const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
+
+    try {
+        await oldContainer.stop();
+    } catch (e) {
+        if (e.statusCode !== 304 && !String(e.message || '').includes('is not running')) {
+            console.warn('[Recreate] stop warning:', e.message);
+        }
+    }
+    try {
+        await oldContainer.remove();
+    } catch (e) {
+        console.warn('[Recreate] remove warning:', e.message);
+    }
+
+    const oldConfig = inspectData.Config;
+    const hostConfig = inspectData.HostConfig;
+
+    // Keep non-overlapping env vars from old container, add new ones
+    const keysToReplace = new Set(Object.keys(newEnvObj));
+    let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
+
+    // Drop server params from old config if they were not explicitly passed in the new config
+    // NOTE: SERVER_NAMES is preserved if passed in newEnvObj to support PIA custom port forwarding
+    const serverParams = ['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES'];
+    serverParams.forEach(k => {
+        if (!newEnvObj[k]) filteredOldEnv = filteredOldEnv.filter(e => e.split('=')[0] !== k);
+    });
+    if (!newEnvObj['SERVER_NAMES']) {
+        filteredOldEnv = filteredOldEnv.filter(e => e.split('=')[0] !== 'SERVER_NAMES');
+    }
+
+    // Drop irrelevant protocol parameters
+    if (newEnvObj.VPN_TYPE === 'wireguard') {
+        filteredOldEnv = filteredOldEnv.filter(e => !e.split('=')[0].startsWith('OPENVPN_'));
+    } else if (newEnvObj.VPN_TYPE === 'openvpn') {
+        filteredOldEnv = filteredOldEnv.filter(e => !e.split('=')[0].startsWith('WIREGUARD_'));
+    }
+
+    // Drop legacy mullvad and prep GODEBUG for old Go CN certificate support
+    filteredOldEnv = filteredOldEnv.map(e => {
+        if (e.startsWith('DNS_UPSTREAM_RESOLVERS=') || e.startsWith('DOT_PROVIDERS=')) {
+            return e.split('=')[0] + '=' + e.split('=')[1].split(',').map(s => s.trim().toLowerCase() === 'mullvad' ? 'quad9' : s).join(',');
+        }
+        return e;
+    }).filter(e => !e.startsWith('GODEBUG='));
+
+    const mergedEnv = [...filteredOldEnv, ...envLines, 'GODEBUG=x509ignoreCN=0'];
+
+    const createOpts = {
+        name: inspectData.Name.replace(/^\//, ''),
+        Image: oldConfig.Image,
+        Env: mergedEnv,
+        ExposedPorts: oldConfig.ExposedPorts,
+        HostConfig: {
+            ...hostConfig,
+        },
+        Labels: oldConfig.Labels,
+    };
+
+    let newContainer;
+    let newGluetunId;
+    try {
+        newContainer = await docker.createContainer(createOpts);
+        await newContainer.start();
+        newGluetunId = newContainer?.id || (await newContainer.inspect().then(i => i.Id).catch(() => null));
+        const running = await waitForContainerRunning(newGluetunId, 15000);
+        if (!running) {
+            throw new Error('new container did not reach running state within 15s');
+        }
+    } catch (createErr) {
+        console.error('[Recreate] create/start failed:', createErr.message);
+        try {
+            const rollbackMsg = await attemptRecreateRollback(backupPayload, createErr.message);
+            throw new Error(`Recreate failed: ${createErr.message}. Rollback: ${rollbackMsg}`);
+        } catch (rollbackErr) {
+            if (rollbackErr.message.startsWith('Recreate failed:')) throw rollbackErr;
+            throw new Error(`Recreate failed: ${createErr.message}. Rollback also failed: ${rollbackErr.message}`);
+        }
+    }
+
+    // If Gluetun is recreated, any containers sharing its network namespace (container:<oldId>)
+    // must also be recreated to attach to the new namespace; restart is not enough.
+    try {
+        const all = await docker.listContainers({ all: true });
+        for (const c of all) {
+            if (!c?.Id || c.Id === oldGluetunId) continue;
+            const cont = docker.getContainer(c.Id);
+            const i = await cont.inspect().catch(() => null);
+            const nm = i?.HostConfig?.NetworkMode || '';
+            const isOldNetns =
+                nm === `container:${oldGluetunId}` ||
+                nm === `container:${oldGluetunName}` ||
+                (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)));
+            if (!isOldNetns) continue;
+            const name = (i?.Name || '').replace(/^\//, '');
+            console.log(`[Startup] Recreating dependent container "${name}" to follow new Gluetun netns.`);
+            try { await cont.stop(); } catch (e) { console.warn(`[Recreate] stop "${name}":`, e.message); }
+            try { await cont.remove(); } catch (e) { console.warn(`[Recreate] remove "${name}":`, e.message); }
+
+            const newHostConfig = { ...(i.HostConfig || {}) };
+            if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+            const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+
+            const create = {
+                name,
+                Image: i.Config.Image,
+                Env: i.Config.Env,
+                Cmd: i.Config.Cmd,
+                Entrypoint: i.Config.Entrypoint,
+                WorkingDir: i.Config.WorkingDir,
+                User: i.Config.User,
+                Labels: i.Config.Labels,
+                HostConfig: finalHostConfig,
+            };
+            const nc = await docker.createContainer(create);
+            await nc.start();
+        }
+
+        // Safety net: if we recreated Gluetun, also recreate known client containers that might be pinned
+        // to the previous network namespace even when Docker reports a name-based network mode.
+        const pinnedClientNames = new Set(['qbittorrent', 'sabnzbd']);
+        for (const c of all) {
+            if (!c?.Id || c.Id === oldGluetunId) continue;
+            const cont = docker.getContainer(c.Id);
+            const i = await cont.inspect().catch(() => null);
+            const name = (i?.Name || '').replace(/^\//, '');
+            if (!pinnedClientNames.has(name)) continue;
+            const nm = i?.HostConfig?.NetworkMode || '';
+            if (!String(nm).startsWith('container:')) continue;
+            // Already handled by the loop above
+            if (
+                nm === `container:${oldGluetunId}` ||
+                nm === `container:${oldGluetunName}` ||
+                (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)))
+            ) {
+                continue;
+            }
+            console.log(`[Startup] Recreating pinned client "${name}" to ensure it follows Gluetun netns.`);
+            try { await cont.stop(); } catch (e) { console.warn(`[Recreate] stop "${name}":`, e.message); }
+            try { await cont.remove(); } catch (e) { console.warn(`[Recreate] remove "${name}":`, e.message); }
+            const newHostConfig = { ...(i.HostConfig || {}) };
+            if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
+            const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
+            const create = {
+                name,
+                Image: i.Config.Image,
+                Env: i.Config.Env,
+                Cmd: i.Config.Cmd,
+                Entrypoint: i.Config.Entrypoint,
+                WorkingDir: i.Config.WorkingDir,
+                User: i.Config.User,
+                Labels: i.Config.Labels,
+                HostConfig: finalHostConfig,
+            };
+            const nc = await docker.createContainer(create);
+            await nc.start();
+        }
+    } catch (e) {
+        console.warn('[Startup] Dependent netns recreate skipped:', e.message);
+    }
+
+    clearRecreateBackup();
+    scheduleSessionIpEnrichment(true);
+    return 'Gluetun recreated successfully.';
+}
+
+async function recreateGluetunContainer(newEnvObj) {
+    return withLifecycleLock('recreate', 'queue', () => recreateGluetunContainerCore(newEnvObj));
 }
 
 /** Gluetun expects Go duration strings (e.g. 24h, 30m). Bare integers error at parse time. */
@@ -884,7 +1095,7 @@ async function migrateGuiEnvConfigInPlace(config) {
                 newEnv += `${k}=${v}\n`;
             }
         }
-        fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
+        writeFileAtomic(ENV_PATH, newEnv);
         console.log('[Config] Migrated env vars and persisted to .env');
     }
 }
@@ -1065,7 +1276,7 @@ async function applyGuiConfiguration(config) {
             envContent += `${key}=${value}\n`;
         }
     }
-    fs.writeFileSync(ENV_PATH, envContent, 'utf8');
+    writeFileAtomic(ENV_PATH, envContent);
 
     const guiOnlyKeys = [
         'GUI_PASSWORD',
@@ -1738,7 +1949,7 @@ function mergeHomelabState(patch) {
     try {
         const cur = loadHomelabState();
         const next = { ...cur, ...patch };
-        fs.writeFileSync(HOMELAB_STATE_PATH, JSON.stringify(next, null, 2), 'utf8');
+        writeFileAtomic(HOMELAB_STATE_PATH, JSON.stringify(next, null, 2));
     } catch (e) {
         console.error('[Homelab] Failed to persist state:', e.message);
     }
@@ -1774,7 +1985,7 @@ function appendConfigDiffHistory(changes) {
         changes,
     });
     arr = arr.slice(-max);
-    fs.writeFileSync(CONFIG_DIFF_HISTORY_PATH, JSON.stringify(arr, null, 2), 'utf8');
+    writeFileAtomic(CONFIG_DIFF_HISTORY_PATH, JSON.stringify(arr, null, 2));
 }
 
 function parseHmToMinutes(s) {
@@ -1867,7 +2078,7 @@ function runDataBackup() {
 
 function saveVpnConnectivityState(obj) {
     try {
-        fs.writeFileSync(VPN_CONNECTIVITY_STATE_PATH, JSON.stringify(obj, null, 2), 'utf8');
+        writeFileAtomic(VPN_CONNECTIVITY_STATE_PATH, JSON.stringify(obj, null, 2));
         mergeHomelabState({
             lastVpnConnectivityProbeAt: obj.at || new Date().toISOString(),
         });
@@ -2113,7 +2324,8 @@ app.post('/api/config', authenticateToken, async (req, res) => {
             guiChangeCount: out.guiChangeCount,
         });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        const status = err.code === 'LIFECYCLE_BUSY' ? 409 : 500;
+        res.status(status).json({ error: err.message });
     }
 });
 
@@ -2445,7 +2657,7 @@ function writeGuiEnv(obj) {
     for (const [k, v] of Object.entries(obj)) {
         if (v !== undefined && v !== null && v.toString().trim() !== '') s += `${k}=${v}\n`;
     }
-    fs.writeFileSync(ENV_PATH, s, 'utf8');
+    writeFileAtomic(ENV_PATH, s);
 }
 
 /** Integer from `gui-config.env`, else process.env, else default (clamped). */
@@ -2515,7 +2727,7 @@ function isAutostartGluetunEnabled() {
  * Run pia-wg-config, write Gluetun env + GUI .env, recreate Gluetun container.
  * @param {string} opts.PIA_REGION — region id passed to pia-wg-config -r
  */
-async function applyPiaWireguardFromCredentials({
+async function applyPiaWireguardFromCredentialsCore({
     PIA_USERNAME,
     PIA_PASSWORD,
     PIA_REGION,
@@ -2617,7 +2829,7 @@ async function applyPiaWireguardFromCredentials({
         .map(([k, v]) => `${k}=${v}`)
         .join('\n') + '\n';
 
-    fs.writeFileSync(GLUETUN_ENV_PATH, gluetunEnvFile, 'utf8');
+    writeFileAtomic(GLUETUN_ENV_PATH, gluetunEnvFile);
     console.log('[PIA-WG] Wrote gluetun env to:', GLUETUN_ENV_PATH);
 
     let envVars = {};
@@ -2659,154 +2871,43 @@ async function applyPiaWireguardFromCredentials({
     for (const [k, v] of Object.entries(envVars)) {
         newEnv += `${k}=${v}\n`;
     }
-    fs.writeFileSync(ENV_PATH, newEnv, 'utf8');
+    writeFileAtomic(ENV_PATH, newEnv);
 
-    const newEnvArray = [
-        'VPN_SERVICE_PROVIDER=custom',
-        'VPN_TYPE=wireguard',
-        `WIREGUARD_PRIVATE_KEY=${privateKey}`,
-        `WIREGUARD_ADDRESSES=${address}`,
-        `WIREGUARD_ENDPOINT_IP=${endpointIP}`,
-        `WIREGUARD_ENDPOINT_PORT=${endpointPort}`,
-        `WIREGUARD_PUBLIC_KEY=${publicKey}`,
-    ];
+    const recreateEnv = {
+        VPN_SERVICE_PROVIDER: 'custom',
+        VPN_TYPE: 'wireguard',
+        WIREGUARD_PRIVATE_KEY: privateKey,
+        WIREGUARD_ADDRESSES: address,
+        WIREGUARD_ENDPOINT_IP: endpointIP,
+        WIREGUARD_ENDPOINT_PORT: endpointPort,
+        WIREGUARD_PUBLIC_KEY: publicKey,
+    };
     if (pfOn) {
-        newEnvArray.push('VPN_PORT_FORWARDING=on');
-        newEnvArray.push('VPN_PORT_FORWARDING_PROVIDER=private internet access');
-        newEnvArray.push(`VPN_PORT_FORWARDING_USERNAME=${PIA_USERNAME}`);
-        newEnvArray.push(`VPN_PORT_FORWARDING_PASSWORD=${PIA_PASSWORD}`);
+        recreateEnv.VPN_PORT_FORWARDING = 'on';
+        recreateEnv.VPN_PORT_FORWARDING_PROVIDER = 'private internet access';
+        recreateEnv.VPN_PORT_FORWARDING_USERNAME = PIA_USERNAME;
+        recreateEnv.VPN_PORT_FORWARDING_PASSWORD = PIA_PASSWORD;
     }
     if (serverName) {
-        newEnvArray.push(`SERVER_NAMES=${serverName}`);
+        recreateEnv.SERVER_NAMES = serverName;
         console.log(`[PIA-WG] Syncing SERVER_NAMES=${serverName} for port forwarding support.`);
     }
 
     let restartMsg = '';
-    const containers = await docker.listContainers({ all: true });
-    const gluetunInfo = containers.find(c => c.Names.some(n => n.includes('gluetun') && !n.includes('gui')));
-    if (gluetunInfo) {
-        const oldContainer = docker.getContainer(gluetunInfo.Id);
-        const inspectData = await oldContainer.inspect();
-        const oldGluetunId = gluetunInfo.Id;
-        const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
-
-        await oldContainer.stop().catch(() => { });
-        await oldContainer.remove().catch(() => { });
-
-        const oldConfig = inspectData.Config;
-        const hostConfig = inspectData.HostConfig;
-
-        const keysToReplace = new Set(newEnvArray.map(e => e.split('=')[0]));
-        let filteredOldEnv = (oldConfig.Env || []).filter(e => !keysToReplace.has(e.split('=')[0]));
-
-        const forbiddenKeysForCustom = new Set(['SERVER_COUNTRIES', 'SERVER_REGIONS', 'SERVER_CITIES', 'SERVER_HOSTNAMES']);
-        filteredOldEnv = filteredOldEnv.filter(e => {
-            const key = e.split('=')[0];
-            if (forbiddenKeysForCustom.has(key)) return false;
-            if (key === 'SERVER_NAMES' && !keysToReplace.has('SERVER_NAMES')) return false;
-            if (key.startsWith('OPENVPN_')) return false;
-            return true;
-        });
-
-        filteredOldEnv = filteredOldEnv.map(e => {
-            if (e.startsWith('DNS_UPSTREAM_RESOLVERS=') || e.startsWith('DOT_PROVIDERS=')) {
-                return e.split('=')[0] + '=' + e.split('=')[1].split(',').map(s => s.trim().toLowerCase() === 'mullvad' ? 'quad9' : s).join(',');
-            }
-            return e;
-        });
-
-        const mergedEnv = [...filteredOldEnv, ...newEnvArray];
-
-        const createOpts = {
-            name: inspectData.Name.replace(/^\//, ''),
-            Image: oldConfig.Image,
-            Env: mergedEnv,
-            ExposedPorts: oldConfig.ExposedPorts,
-            HostConfig: { ...hostConfig },
-            Labels: oldConfig.Labels,
-        };
-
-        const newContainer = await docker.createContainer(createOpts);
-        await newContainer.start();
-        const newGluetunId = newContainer?.id || (await newContainer.inspect().then(i => i.Id).catch(() => null));
-        restartMsg = ' Gluetun recreated with new WireGuard config.';
+    try {
+        const recreateResult = await recreateGluetunContainerCore(recreateEnv);
+        restartMsg = ` ${recreateResult}`;
         console.log('[PIA-WG] Gluetun container recreated successfully');
-
-        // Recreate any containers sharing Gluetun's network namespace so they follow the new container id.
-        try {
-            const all = await docker.listContainers({ all: true });
-            for (const c of all) {
-                if (!c?.Id || c.Id === oldGluetunId) continue;
-                const cont = docker.getContainer(c.Id);
-                const i = await cont.inspect().catch(() => null);
-                const nm = i?.HostConfig?.NetworkMode || '';
-                const isOldNetns =
-                    nm === `container:${oldGluetunId}` ||
-                    nm === `container:${oldGluetunName}` ||
-                    (oldGluetunId && typeof nm === 'string' && nm.startsWith('container:') && nm.slice('container:'.length).startsWith(oldGluetunId.slice(0, 12)));
-                if (!isOldNetns) continue;
-                const name = (i?.Name || '').replace(/^\//, '');
-                console.log(`[PIA-WG] Recreating dependent container "${name}" to follow new Gluetun netns.`);
-                await cont.stop().catch(() => {});
-                await cont.remove().catch(() => {});
-                const newHostConfig = { ...(i.HostConfig || {}) };
-                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
-                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
-                const createDep = {
-                    name,
-                    Image: i.Config.Image,
-                    Env: i.Config.Env,
-                    Cmd: i.Config.Cmd,
-                    Entrypoint: i.Config.Entrypoint,
-                    WorkingDir: i.Config.WorkingDir,
-                    User: i.Config.User,
-                    Labels: i.Config.Labels,
-                    HostConfig: finalHostConfig,
-                };
-                const nc = await docker.createContainer(createDep);
-                await nc.start();
-            }
-
-            // Safety net: qbittorrent (and other client containers) can remain pinned to a stale
-            // container:<id> netns after Gluetun is recreated by this pipeline. If so, recreate it
-            // to point at the new Gluetun id even if the old id doesn't match what we captured.
-            const pinned = ['qbittorrent', 'sabnzbd'];
-            for (const name of pinned) {
-                const cInfo = all.find((c) => (c.Names || []).some((n) => n === `/${name}`));
-                if (!cInfo) continue;
-                const cont = docker.getContainer(cInfo.Id);
-                const i = await cont.inspect().catch(() => null);
-                const nm = String(i?.HostConfig?.NetworkMode || '');
-                if (!nm.startsWith('container:')) continue;
-                if (newGluetunId && nm === `container:${newGluetunId}`) continue;
-                console.log(`[PIA-WG] Recreating pinned client "${name}" to follow Gluetun netns.`);
-                await cont.stop().catch(() => {});
-                await cont.remove().catch(() => {});
-                const newHostConfig = { ...(i.HostConfig || {}) };
-                if (newGluetunId) newHostConfig.NetworkMode = `container:${newGluetunId}`;
-                const finalHostConfig = sanitizeHostConfigForContainerNetworkMode(newHostConfig);
-                const createDep = {
-                    name,
-                    Image: i.Config.Image,
-                    Env: i.Config.Env,
-                    Cmd: i.Config.Cmd,
-                    Entrypoint: i.Config.Entrypoint,
-                    WorkingDir: i.Config.WorkingDir,
-                    User: i.Config.User,
-                    Labels: i.Config.Labels,
-                    HostConfig: finalHostConfig,
-                };
-                const nc = await docker.createContainer(createDep);
-                await nc.start();
-            }
-        } catch (e) {
-            console.warn('[PIA-WG] Dependent netns recreate skipped:', e.message);
-        }
-    } else {
-        restartMsg = ' Warning: Gluetun container not found.';
+    } catch (e) {
+        restartMsg = ` Warning: ${e.message}`;
+        throw e;
     }
 
     return { privateKey, serverName, restartMsg };
+}
+
+async function applyPiaWireguardFromCredentials(opts) {
+    return withLifecycleLock('pia-wireguard', 'queue', () => applyPiaWireguardFromCredentialsCore(opts));
 }
 
 // PIA WireGuard Config Generation
@@ -3200,7 +3301,7 @@ async function maybeAutostartGluetunOnStartup() {
     }
 }
 
-async function restartGluetunContainerHelper() {
+async function restartGluetunContainerCore() {
     const containers = await docker.listContainers({ all: true });
     const gluetun = findGluetunEngineContainer(containers);
     if (!gluetun) {
@@ -3209,12 +3310,17 @@ async function restartGluetunContainerHelper() {
     }
     await docker.getContainer(gluetun.Id).restart();
     console.log('[Failover] Gluetun container restarted.');
+    scheduleSessionIpEnrichment(true);
+}
+
+async function restartGluetunContainerHelper() {
+    return withLifecycleLock('restart', 'queue', () => restartGluetunContainerCore());
 }
 
 /**
  * Advance PIA_REGION_INDEX and reconnect (WireGuard: regenerate; OpenVPN PIA: new SERVER_REGIONS).
  */
-async function executeFailoverRotation() {
+async function executeFailoverRotationCore() {
     const env = readGuiEnv();
     const vpnType = (env.VPN_TYPE || 'wireguard').toLowerCase();
 
@@ -3227,7 +3333,7 @@ async function executeFailoverRotation() {
 
     if (!regions.length) {
         console.log('[Failover] No regions in GUI env; restarting Gluetun only.');
-        await restartGluetunContainerHelper();
+        await restartGluetunContainerCore();
         return;
     }
 
@@ -3242,12 +3348,12 @@ async function executeFailoverRotation() {
 
     if (regions.length === 1) {
         console.log('[Failover] Only one region configured; restarting Gluetun.');
-        await restartGluetunContainerHelper();
+        await restartGluetunContainerCore();
         return;
     }
 
     if (vpnType === 'wireguard' && env.PIA_USERNAME && env.PIA_PASSWORD) {
-        await applyPiaWireguardFromCredentials({
+        await applyPiaWireguardFromCredentialsCore({
             PIA_USERNAME: env.PIA_USERNAME,
             PIA_PASSWORD: env.PIA_PASSWORD,
             PIA_REGION: targetRegion,
@@ -3266,7 +3372,7 @@ async function executeFailoverRotation() {
                 console.error(
                     `[Failover] Invalid PIA OpenVPN region "${targetRegion}". Update PIA_OPENVPN_REGIONS in Settings (region labels or legacy server codes) and save.`,
                 );
-                await restartGluetunContainerHelper();
+                await restartGluetunContainerCore();
                 return;
             }
             if (isPiaOpenVpnPortForwardingEnabled(env)) {
@@ -3275,20 +3381,25 @@ async function executeFailoverRotation() {
                     console.error(
                         `[Failover] "${canon}" has no OpenVPN port-forwarding servers in Gluetun data while VPN port forwarding is on. Re-save Settings with PF-capable regions (e.g. CA Montreal).`,
                     );
-                    await restartGluetunContainerHelper();
+                    await restartGluetunContainerCore();
                     return;
                 }
             }
-            await recreateGluetunContainer({ SERVER_REGIONS: canon });
+            await recreateGluetunContainerCore({ SERVER_REGIONS: canon });
         } catch (e) {
             console.error('[Failover] OpenVPN server list check failed:', e.message);
-            await restartGluetunContainerHelper();
+            await restartGluetunContainerCore();
         }
         return;
     }
 
     console.log('[Failover] No PIA rotation path matched; restarting Gluetun.');
-    await restartGluetunContainerHelper();
+    await restartGluetunContainerCore();
+}
+
+async function executeFailoverRotation(options = {}) {
+    const mode = options.mode || 'queue';
+    return withLifecycleLock('failover', mode, () => executeFailoverRotationCore());
 }
 
 async function checkVPN() {
@@ -3468,6 +3579,10 @@ async function checkVPN() {
         if (pfFailCount >= pfFailTh) {
             notifyWebhook('port_forwarding_failed', { pfFailCount, failCount, threshold: pfFailTh });
         }
+        if (getLifecycleState().busy) {
+            console.log('[Monitor] Skipping failover — container operation in progress');
+            return setTimeout(checkVPN, msFail);
+        }
         try {
             await executeFailoverRotation();
             failCount = 0;
@@ -3518,11 +3633,12 @@ app.get('/api/pia/monitoring', authenticateToken, (req, res) => {
 
 app.post('/api/test-failover', authenticateToken, async (req, res) => {
     try {
-        await executeFailoverRotation();
+        await executeFailoverRotation({ mode: 'reject' });
         res.json({ message: 'Failover rotation executed.' });
     } catch (err) {
         console.error('[Test-Failover]', err.message);
-        res.status(500).json({ error: err.message });
+        const status = err.code === 'LIFECYCLE_BUSY' ? 409 : 500;
+        res.status(status).json({ error: err.message });
     }
 });
 
@@ -3976,6 +4092,11 @@ function maybeRunScheduledBackup() {
 // Start checker after a short delay
 setTimeout(checkVPN, 15000);
 setInterval(maybeRunScheduledBackup, 15 * 60 * 1000);
+setInterval(() => {
+    enrichCurrentSessionFromLogs(false).catch((e) => {
+        console.error('[Sessions] Background IP enrichment failed:', e.message);
+    });
+}, 45000);
 
 const PORT = 3000;
 app.listen(PORT, () => {
