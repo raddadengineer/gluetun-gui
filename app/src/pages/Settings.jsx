@@ -634,7 +634,7 @@ export default function Settings() {
       .catch(console.error);
 
     // Fetch PIA WireGuard regions via backend proxy (avoids CORS)
-    fetch('/api/pia/regions')
+    fetch('/api/pia/regions', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
       .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
       .catch(console.error);
@@ -684,8 +684,9 @@ export default function Settings() {
   const fetchPiaRegions = async () => {
     setFetchingPiaWgRegions(true);
     try {
+      const token = localStorage.getItem('token');
       const pfQ = piaPortForwarding ? '?portForwardOnly=1' : '';
-      const res = await fetch(`/api/pia/regions${pfQ}`);
+      const res = await fetch(`/api/pia/regions${pfQ}`, { headers: { 'Authorization': `Bearer ${token}` } });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`Failed to fetch PIA regions (${res.status})${text ? `: ${text}` : ''}`);

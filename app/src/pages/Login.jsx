@@ -7,6 +7,7 @@ export default function Login() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    if (loading) return; // BUG 20: prevent double-submit via keyboard Enter while button is disabled
     setLoading(true);
     setError('');
 

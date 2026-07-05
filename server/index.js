@@ -1686,8 +1686,11 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
     }
     const now = Date.now();
     // Debounce: avoid repeated actions during flapping.
+    // BUG 27: do NOT update lastQbitAutoConnected here — updating it during the
+    // debounce early-return causes transitions within the 5s window to be lost.
+    // e.g. VPN goes down then recovers in <5s: lastQbitAutoConnected was set to
+    // true during the debounce so the reconnect event would be silently dropped.
     if (now - lastQbitAutoActionAtMs < 5000) {
-        lastQbitAutoConnected = connected;
         return;
     }
 
@@ -1900,9 +1903,11 @@ function parseEnvFileToMap(envPath) {
     const o = {};
     if (!fs.existsSync(envPath)) return o;
     fs.readFileSync(envPath, 'utf8').split('\n').forEach((line) => {
-        if (line && line.includes('=')) {
-            const parts = line.split('=');
-            o[parts[0]] = parts.slice(1).join('=').trim();
+        // BUG 2/3: do NOT .trim() the value — silently strips intentional whitespace (e.g. passwords with spaces)
+        const raw = line.replace(/\r$/, ''); // strip CR only
+        if (raw && raw.includes('=')) {
+            const parts = raw.split('=');
+            o[parts[0]] = parts.slice(1).join('=');
         }
     });
     return o;
@@ -2047,7 +2052,10 @@ function runDataBackup() {
         const filename = `gluetun-gui-backup-${stamp}.tar.gz`;
         const outPath = path.join(backupsDir, filename);
         const members = [];
-        for (const rel of ['gui-config.env', 'sessions.json', 'vpn-connectivity-state.json', 'gluetun.env']) {
+        for (const rel of ['gui-config.env', 'sessions.json', 'vpn-connectivity-state.json', 'gluetun.env',
+            // BUG 25: also back up config change history and homelab state so a full
+            // restore doesn't silently lose config diff history or last backup/webhook info.
+            'config-diff-history.json', 'homelab-state.json']) {
             if (fs.existsSync(path.join(DATA_DIR, rel))) members.push(rel);
         }
         if (fs.existsSync(path.join(DATA_DIR, 'wireguard'))) members.push('wireguard');
@@ -2233,6 +2241,9 @@ function notifyWebhook(event, payload) {
                 error: null,
             },
         });
+        // BUG 8: drain the response body and swallow errors so an unexpected stream
+        // error doesn't throw an uncaught 'error' event that could crash Node.
+        resOut.on('error', () => {});
         resOut.resume();
     });
     reqOut.on('error', (e) => {
@@ -2332,12 +2343,17 @@ app.post('/api/config', authenticateToken, async (req, res) => {
 // ── Shared Servers Caching Logic ───────────────────────────────────────────
 let gluetunServersCache = null;
 let lastServerFetchTime = 0;
+// BUG 6: track the in-flight promise so concurrent cold-cache requests share
+// a single outbound fetch instead of racing (thundering-herd prevention).
+let fetchGluetunServersInFlight = null;
 
 async function fetchGluetunServers() {
     if (gluetunServersCache && Date.now() - lastServerFetchTime < 86400000) {
         return gluetunServersCache;
     }
-    return new Promise((resolve, reject) => {
+    // Return the already-running promise if one exists.
+    if (fetchGluetunServersInFlight) return fetchGluetunServersInFlight;
+    fetchGluetunServersInFlight = new Promise((resolve, reject) => {
         const url = 'https://raw.githubusercontent.com/qdm12/gluetun/master/internal/storage/servers.json';
         const opts = {
             headers: { 'User-Agent': 'gluetun-gui/1.0 (+https://github.com/qdm12/gluetun)' },
@@ -2356,7 +2372,10 @@ async function fetchGluetunServers() {
                 }
             });
         }).on('error', reject);
+    }).finally(() => {
+        fetchGluetunServersInFlight = null;
     });
+    return fetchGluetunServersInFlight;
 }
 
 function isPiaProviderName(provider) {
@@ -2644,9 +2663,11 @@ function readGuiEnv() {
     const o = {};
     if (!fs.existsSync(ENV_PATH)) return o;
     fs.readFileSync(ENV_PATH, 'utf8').split('\n').forEach(line => {
-        if (line && line.includes('=')) {
-            const parts = line.split('=');
-            o[parts[0]] = parts.slice(1).join('=').trim();
+        // BUG 2/3: do NOT .trim() the value — silently strips intentional whitespace (e.g. passwords with spaces)
+        const raw = line.replace(/\r$/, ''); // strip CR only
+        if (raw && raw.includes('=')) {
+            const parts = raw.split('=');
+            o[parts[0]] = parts.slice(1).join('=');
         }
     });
     return o;
@@ -2736,15 +2757,21 @@ async function applyPiaWireguardFromCredentialsCore({
     PIA_REGION_INDEX = '0',
 }) {
     const pfOn = PIA_PORT_FORWARDING === 'true' || PIA_PORT_FORWARDING === 'on';
-    const pfFlag = pfOn ? ' -p' : '';
     const safeRegion = PIA_REGION.replace(/[^a-zA-Z0-9_-]/g, '');
     const wgConfPath = path.join(WG_CONFIG_DIR, 'wg0.conf');
-    const cmd = `/usr/local/bin/pia-wg-config -o ${wgConfPath} -r ${safeRegion} -s -v${pfFlag} "${PIA_USERNAME}" "${PIA_PASSWORD}"`;
 
-    console.log('[PIA-WG] Running command:', cmd.replace(PIA_PASSWORD, '***'));
+    // BUG 1: use execFile() with an explicit args array to prevent shell injection.
+    // PIA_USERNAME / PIA_PASSWORD are passed as discrete arguments so that any
+    // shell-special characters (quotes, backticks, $(), etc.) in the credentials
+    // are never interpreted by a shell.
+    const execArgs = ['-o', wgConfPath, '-r', safeRegion, '-s', '-v'];
+    if (pfOn) execArgs.push('-p');
+    execArgs.push(PIA_USERNAME, PIA_PASSWORD);
+
+    console.log('[PIA-WG] Running pia-wg-config with args:', ['-o', wgConfPath, '-r', safeRegion, '-s', '-v', pfOn ? '-p' : null, PIA_USERNAME, '***'].filter(Boolean));
 
     const cmdOutput = await new Promise((resolve, reject) => {
-        exec(cmd, { timeout: 30000, env: { ...process.env, GODEBUG: 'x509ignoreCN=0' } }, (error, stdout, stderr) => {
+        execFile('/usr/local/bin/pia-wg-config', execArgs, { timeout: 30000, env: { ...process.env, GODEBUG: 'x509ignoreCN=0' } }, (error, stdout, stderr) => {
             console.log('[PIA-WG] stdout:', stdout);
             console.log('[PIA-WG] stderr:', stderr);
             if (error) reject(new Error(stderr || stdout || error.message));
@@ -2834,13 +2861,8 @@ async function applyPiaWireguardFromCredentialsCore({
 
     let envVars = {};
     if (fs.existsSync(ENV_PATH)) {
-        const data = fs.readFileSync(ENV_PATH, 'utf8');
-        data.split('\n').forEach(line => {
-            if (line && line.includes('=')) {
-                const parts = line.split('=');
-                envVars[parts[0]] = parts.slice(1).join('=').trim();
-            }
-        });
+        // BUG 2/3: use parseEnvFileToMap to avoid duplicating (and silently trimming) env parsing logic
+        envVars = parseEnvFileToMap(ENV_PATH);
     }
     // If PIA PF is enabled and the generator did not produce a server name,
     // keep the last known SERVER_NAMES so Gluetun port-forwarding doesn't panic.
@@ -2867,11 +2889,21 @@ async function applyPiaWireguardFromCredentialsCore({
     envVars.VPN_TYPE = 'wireguard';
     if (serverName) envVars.SERVER_NAMES = serverName;
 
+    // Sync the freshly-generated WireGuard credentials back into gui-config.env.
+    // Without this, any subsequent Settings save or compose restart reads the OLD stale
+    // keys from gui-config.env and reverts the container back to dead credentials.
+    envVars.WIREGUARD_PRIVATE_KEY = privateKey;
+    envVars.WIREGUARD_PUBLIC_KEY = publicKey;
+    envVars.WIREGUARD_ADDRESSES = address;
+    envVars.WIREGUARD_ENDPOINT_IP = endpointIP;
+    envVars.WIREGUARD_ENDPOINT_PORT = endpointPort;
+
     let newEnv = '';
     for (const [k, v] of Object.entries(envVars)) {
         newEnv += `${k}=${v}\n`;
     }
     writeFileAtomic(ENV_PATH, newEnv);
+
 
     const recreateEnv = {
         VPN_SERVICE_PROVIDER: 'custom',
@@ -2899,8 +2931,9 @@ async function applyPiaWireguardFromCredentialsCore({
         restartMsg = ` ${recreateResult}`;
         console.log('[PIA-WG] Gluetun container recreated successfully');
     } catch (e) {
-        restartMsg = ` Warning: ${e.message}`;
-        throw e;
+        // BUG 14: previously set restartMsg then re-threw, making it unreachable.
+        // Now embed the warning context directly in the thrown error so callers see it.
+        throw new Error(`Container recreate failed: ${e.message}`);
     }
 
     return { privateKey, serverName, restartMsg };
@@ -2918,7 +2951,9 @@ app.get('/api/pia/status', authenticateToken, (req, res) => {
 });
 
 // Proxy PIA server list to avoid CORS issues in browser
-app.get('/api/pia/regions', async (req, res) => {
+// BUG 16: added authenticateToken — without it any unauthenticated caller could
+// force the server to make outbound requests to piaservers.net.
+app.get('/api/pia/regions', authenticateToken, async (req, res) => {
     try {
         const https = require('https');
         const portForwardOnly = req.query.portForwardOnly === '1' || req.query.portForwardOnly === 'true';
@@ -3038,10 +3073,13 @@ function demuxDockerExecOutput(buf) {
 
 async function collectExecOutput(stream, timeoutMs = 7000) {
     const chunks = [];
-    await new Promise((resolve) => {
+    await new Promise((resolve, reject) => {
         stream.on('data', (c) => chunks.push(c));
         stream.on('end', resolve);
-        stream.on('error', resolve);
+        // BUG 17: stream errors previously resolved with partial data, silently
+        // returning truncated output (e.g. for VPN connectivity checks). Now reject
+        // so the error propagates to the caller instead of being masked.
+        stream.on('error', reject);
         setTimeout(resolve, timeoutMs);
     });
     return demuxDockerExecOutput(Buffer.concat(chunks));
@@ -3339,18 +3377,21 @@ async function executeFailoverRotationCore() {
 
     let idx = parseInt(env.PIA_REGION_INDEX || '0', 10);
     if (isNaN(idx) || idx < 0) idx = 0;
+
+    // BUG 13: check single-region BEFORE mutating and persisting the index to avoid
+    // an unnecessary disk write when there is nothing to rotate.
+    if (regions.length === 1) {
+        console.log('[Failover] Only one region configured; restarting Gluetun.');
+        await restartGluetunContainerCore();
+        return;
+    }
+
     const nextIdx = (idx + 1) % regions.length;
     env.PIA_REGION_INDEX = String(nextIdx);
     writeGuiEnv(env);
 
     const targetRegion = regions[nextIdx];
     console.log(`[Failover] Rotating to index ${nextIdx}/${regions.length - 1}: ${targetRegion}`);
-
-    if (regions.length === 1) {
-        console.log('[Failover] Only one region configured; restarting Gluetun.');
-        await restartGluetunContainerCore();
-        return;
-    }
 
     if (vpnType === 'wireguard' && env.PIA_USERNAME && env.PIA_PASSWORD) {
         await applyPiaWireguardFromCredentialsCore({
@@ -3449,6 +3490,10 @@ async function checkVPN() {
                 console.log(
                     `[Monitor] Skipping connectivity check during warm-up (${Math.round(ageMs / 1000)}s / ${Math.round(warmupMs / 1000)}s, ${vpnTypeMon}).`,
                 );
+                // BUG 11: reset fail counters on warm-up so stale counts from before
+                // a container restart don't immediately trigger a failover after warm-up ends.
+                failCount = 0;
+                pfFailCount = 0;
                 lastMonitoringSnapshot = { ...monitoringData, timestamp: new Date().toISOString(), warmup: true, vpnType: vpnTypeMon };
                 return setTimeout(checkVPN, msFail);
             }
@@ -3484,13 +3529,8 @@ async function checkVPN() {
             // 2. Check Port Forwarding if enabled
             let envVars = {};
             if (fs.existsSync(ENV_PATH)) {
-                const data = fs.readFileSync(ENV_PATH, 'utf8');
-                data.split('\n').forEach(line => {
-                    if (line && line.includes('=')) {
-                        const parts = line.split('=');
-                        envVars[parts[0]] = parts.slice(1).join('=').trim();
-                    }
-                });
+                // BUG 2/3: use shared parseEnvFileToMap to avoid yet another inline duplicate
+                envVars = parseEnvFileToMap(ENV_PATH);
             }
 
             const piaPfEnabled = envVars.PIA_PORT_FORWARDING === 'true' || envVars.PIA_PORT_FORWARDING === 'on';
@@ -3502,8 +3542,14 @@ async function checkVPN() {
                 const statusFile = String(envVars.VPN_PORT_FORWARDING_STATUS_FILE || '/tmp/gluetun/forwarded_port').trim() || '/tmp/gluetun/forwarded_port';
                 let filePort = 0;
                 try {
-                    const fileCmd = `sh -lc 'test -f ${JSON.stringify(statusFile)} && cat ${JSON.stringify(statusFile)} || true'`;
-                    const fileExec = await container.exec({ Cmd: ['sh', '-c', fileCmd], AttachStdout: true, AttachStderr: true });
+                    // BUG 15: pass statusFile as a positional argument ($1) instead of
+                    // interpolating into the shell string. A path containing a single-quote
+                    // would break the inner sh -c quoting and potentially cause unexpected behavior.
+                    const fileExec = await container.exec({
+                        Cmd: ['sh', '-c', 'test -f "$1" && cat "$1" || true', '--', statusFile],
+                        AttachStdout: true,
+                        AttachStderr: true,
+                    });
                     const fileStream = await fileExec.start();
                     const fileOut = (await collectExecOutput(fileStream)).trim();
                     filePort = fileOut.match(/([0-9]{2,6})/) ? parseInt(fileOut.match(/([0-9]{2,6})/)[1], 10) : 0;
@@ -3570,6 +3616,11 @@ async function checkVPN() {
     // Persist last snapshot for UI consumption
     lastMonitoringSnapshot = { ...monitoringData };
 
+    // BUG 12: save prev counts BEFORE the failover branch so that after a failover
+    // resets failCount=0, the next successful tick doesn't fire a spurious 'recovered' webhook.
+    prevCheckVpnFailCount = failCount;
+    prevCheckVpnPfFailCount = pfFailCount;
+
     // 3. Handle Failures
     if (failCount >= connFailTh || pfFailCount >= pfFailTh) {
         console.log(`[Monitor] Persistent failure detected (Fail: ${failCount}, PF-Fail: ${pfFailCount}). Executing Auto-Failover...`);
@@ -3592,9 +3643,6 @@ async function checkVPN() {
         }
         return setTimeout(checkVPN, msFail);
     }
-
-    prevCheckVpnFailCount = failCount;
-    prevCheckVpnPfFailCount = pfFailCount;
 
     // 4. Schedule next check
     const nextInterval = (failCount > 0 || pfFailCount > 0) ? msFail : msHealthy;
@@ -4079,7 +4127,9 @@ app.post('/api/homelab/backup-run', authenticateToken, async (req, res) => {
 
 function maybeRunScheduledBackup() {
     const gui = readGuiEnv();
-    const hrs = parseFloat(String(gui.GUI_BACKUP_INTERVAL_HOURS || '0'), 10);
+    // BUG 10: parseFloat ignores any argument beyond the first; the '10' radix was
+    // a copy-paste from parseInt and was silently ignored. Removed to avoid confusion.
+    const hrs = parseFloat(String(gui.GUI_BACKUP_INTERVAL_HOURS || '0'));
     if (!DATA_DIR || !Number.isFinite(hrs) || hrs <= 0) return;
     const st = loadHomelabState();
     const last = st.lastScheduledBackupAt ? Date.parse(st.lastScheduledBackupAt) : 0;
