@@ -2799,6 +2799,25 @@ export default function Settings() {
                       </div>
                     </div>
 
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
+                      <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px' }}>
+                          <hr style={{ flex: 1, borderTop: '1px solid var(--border)' }} />
+                          <span style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: 'bold' }}>OR</span>
+                          <hr style={{ flex: 1, borderTop: '1px solid var(--border)' }} />
+                        </div>
+                      </div>
+                      <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <label>
+                          API Key <span style={{ color: 'var(--text-muted)', fontWeight: 'normal', fontSize: '13px' }}>(v5.2.0+)</span>
+                        </label>
+                        <input type="password" name="GUI_QBITTORRENT_API_KEY" value={config.GUI_QBITTORRENT_API_KEY || ''} onChange={handleChange} className="text-input" placeholder="Overrides Username/Password" />
+                        <p style={{ marginTop: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                          Stateless authentication. Leave Username/Password blank if using an API Key.
+                        </p>
+                      </div>
+                    </div>
+
                     <div style={{ marginTop: '12px' }} className="toggle-switch-container">
                       <div className="toggle-info">
                         <strong style={{ fontSize: '15px' }}>Allow insecure HTTPS</strong>

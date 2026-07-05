@@ -1311,6 +1311,7 @@ async function applyGuiConfiguration(config) {
         'GUI_QBITTORRENT_URL',
         'GUI_QBITTORRENT_USERNAME',
         'GUI_QBITTORRENT_PASSWORD',
+        'GUI_QBITTORRENT_API_KEY',
         'GUI_QBITTORRENT_INSECURE_TLS',
         'GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN',
         'GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP',
@@ -1470,6 +1471,7 @@ function getGuiIntegrationConfig() {
             url: String(c.GUI_QBITTORRENT_URL || '').trim(),
             username: String(c.GUI_QBITTORRENT_USERNAME || '').trim(),
             password: String(c.GUI_QBITTORRENT_PASSWORD || '').trim(),
+            apiKey: String(c.GUI_QBITTORRENT_API_KEY || '').trim(),
             insecureTls: String(c.GUI_QBITTORRENT_INSECURE_TLS || '').trim().toLowerCase() === 'on',
             autoPauseOnVpnDown: String(c.GUI_QBITTORRENT_AUTO_PAUSE_ON_VPN_DOWN || '').trim().toLowerCase() === 'on',
             autoResumeOnVpnUp: String(c.GUI_QBITTORRENT_AUTO_RESUME_ON_VPN_UP || '').trim().toLowerCase() === 'on',
@@ -1527,15 +1529,20 @@ async function qbittorrentLoginCookie({ baseUrl, username, password, insecureTls
     return { cookie: m ? m[0] : null, agent };
 }
 
-async function qbittorrentFetch({ baseUrl, path: p, method = 'GET', cookie, agent, form }) {
+async function qbittorrentFetch({ baseUrl, path: p, method = 'GET', cookie, agent, form, apiKey, insecureTls }) {
     const u = String(baseUrl || '').replace(/\/+$/, '');
     const url = `${u}${p.startsWith('/') ? p : `/${p}`}`;
     const headers = {};
-    if (cookie) headers.cookie = cookie;
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+    else if (cookie) headers.cookie = cookie;
     let body = undefined;
     if (form) {
         headers['Content-Type'] = 'application/x-www-form-urlencoded';
         body = form;
+    }
+    if (!agent) {
+        const isHttps = url.startsWith('https://');
+        agent = isHttps && insecureTls ? new https.Agent({ rejectUnauthorized: false }) : undefined;
     }
     const res = await fetch(url, { method, headers, body, ...(agent ? { agent } : {}) });
     const text = await res.text().catch(() => '');
@@ -1543,37 +1550,32 @@ async function qbittorrentFetch({ baseUrl, path: p, method = 'GET', cookie, agen
     return text;
 }
 
-async function qbittorrentPauseAll(q) {
+async function qbittorrentRequest(q, { path: p, method = 'GET', form }) {
+    if (q.apiKey) {
+        return await qbittorrentFetch({ baseUrl: q.url, path: p, method, apiKey: q.apiKey, insecureTls: q.insecureTls, form });
+    }
     const { cookie, agent } = await qbittorrentLoginCookie({
         baseUrl: q.url,
         username: q.username,
         password: q.password,
         insecureTls: q.insecureTls,
     });
+    return await qbittorrentFetch({ baseUrl: q.url, path: p, method, cookie, agent, form });
+}
+
+async function qbittorrentPauseAll(q) {
     const form = new URLSearchParams();
     form.set('hashes', 'all');
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/pause', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/torrents/pause', method: 'POST', form });
 }
 
 async function qbittorrentResumeAll(q) {
-    const { cookie, agent } = await qbittorrentLoginCookie({
-        baseUrl: q.url,
-        username: q.username,
-        password: q.password,
-        insecureTls: q.insecureTls,
-    });
     const form = new URLSearchParams();
     form.set('hashes', 'all');
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/resume', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/torrents/resume', method: 'POST', form });
 }
 
 async function qbittorrentApplySafeDefaults(q) {
-    const { cookie, agent } = await qbittorrentLoginCookie({
-        baseUrl: q.url,
-        username: q.username,
-        password: q.password,
-        insecureTls: q.insecureTls,
-    });
     // NOTE: We intentionally do NOT touch category save paths here (user requested).
     const prefs = {
         anonymous_mode: true,
@@ -1587,21 +1589,15 @@ async function qbittorrentApplySafeDefaults(q) {
     };
     const form = new URLSearchParams();
     form.set('json', JSON.stringify(prefs));
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/app/setPreferences', method: 'POST', form });
     return prefs;
 }
 
 async function qbittorrentSetListenPort(q, port) {
-    const { cookie, agent } = await qbittorrentLoginCookie({
-        baseUrl: q.url,
-        username: q.username,
-        password: q.password,
-        insecureTls: q.insecureTls,
-    });
     const prefs = { listen_port: port };
     const form = new URLSearchParams();
     form.set('json', JSON.stringify(prefs));
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/app/setPreferences', method: 'POST', form });
     return prefs;
 }
 
@@ -1630,12 +1626,6 @@ async function qbittorrentEnsureBindTun0(q, preferences) {
 
     if (curIf === desiredIf && curBindIp === '') return { changed: false, desiredIf };
 
-    const { cookie, agent } = await qbittorrentLoginCookie({
-        baseUrl: q.url,
-        username: q.username,
-        password: q.password,
-        insecureTls: q.insecureTls,
-    });
     // qBittorrent preference keys differ by version; set both legacy and current keys.
     const prefs = {
         current_network_interface: desiredIf,
@@ -1646,18 +1636,12 @@ async function qbittorrentEnsureBindTun0(q, preferences) {
     };
     const form = new URLSearchParams();
     form.set('json', JSON.stringify(prefs));
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/app/setPreferences', method: 'POST', form });
     console.log(`[Integrations][qBittorrent] auto-bind applied: ${desiredIf}`);
     return { changed: true, desiredIf };
 }
 
 async function qbittorrentSetNetworkInterface(q, ifaceName) {
-    const { cookie, agent } = await qbittorrentLoginCookie({
-        baseUrl: q.url,
-        username: q.username,
-        password: q.password,
-        insecureTls: q.insecureTls,
-    });
     const prefs = {
         current_network_interface: ifaceName,
         current_interface_name: ifaceName,
@@ -1667,7 +1651,7 @@ async function qbittorrentSetNetworkInterface(q, ifaceName) {
     };
     const form = new URLSearchParams();
     form.set('json', JSON.stringify(prefs));
-    await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/setPreferences', method: 'POST', cookie, agent, form });
+    await qbittorrentRequest(q, { path: '/api/v2/app/setPreferences', method: 'POST', form });
     return prefs;
 }
 
@@ -1680,7 +1664,7 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
         lastQbitAutoConnected = connected;
         return;
     }
-    if (!q.url || !q.username || !q.password) {
+    if (!q.url || ((!q.username || !q.password) && !q.apiKey)) {
         lastQbitAutoConnected = connected;
         return;
     }
@@ -1718,13 +1702,7 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
         }
         if (connected && q.killSwitchOnVpnDown && lastQbitKillSwitchApplied) {
             // Restore safe tunnel binding when VPN is back.
-            const { cookie, agent } = await qbittorrentLoginCookie({
-                baseUrl: q.url,
-                username: q.username,
-                password: q.password,
-                insecureTls: q.insecureTls,
-            });
-            const prefsRaw = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+            const prefsRaw = await qbittorrentRequest(q, { path: '/api/v2/app/preferences' });
             let preferences = null;
             try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
             const r = await qbittorrentEnsureBindTun0(q, preferences);
@@ -1736,13 +1714,7 @@ async function maybeAutoManageQbittorrentOnVpnTransition(connected) {
         }
         if (connected && q.autoBindTun0) {
             // Enforce safe binding when VPN is up so qBittorrent won't leak.
-            const { cookie, agent } = await qbittorrentLoginCookie({
-                baseUrl: q.url,
-                username: q.username,
-                password: q.password,
-                insecureTls: q.insecureTls,
-            });
-            const prefsRaw = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+            const prefsRaw = await qbittorrentRequest(q, { path: '/api/v2/app/preferences' });
             let preferences = null;
             try { preferences = JSON.parse(prefsRaw); } catch { preferences = null; }
             const r = await qbittorrentEnsureBindTun0(q, preferences);
@@ -1761,7 +1733,7 @@ let lastQbitAutoSyncAtMs = 0;
 async function maybeAutoSyncQbittorrentForwardedPort(newPort) {
     const { qbittorrent: q } = getGuiIntegrationConfig();
     if (!q.enabled || !q.autoSyncPortForward) return;
-    if (!q.url || !q.username || !q.password) return;
+    if (!q.url || ((!q.username || !q.password) && !q.apiKey)) return;
     const port = Number(newPort);
     if (!Number.isFinite(port) || port <= 0) return;
 
@@ -3793,30 +3765,12 @@ app.get('/api/integrations/qbittorrent/status', authenticateToken, async (req, r
         console.log('[Integrations][qBittorrent] status request');
         if (!q.enabled) return res.json({ enabled: false });
         if (!q.url) return res.json({ enabled: true, configured: false });
-        if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
+        if ((!q.username || !q.password) && !q.apiKey) return res.json({ configured: true, ok: false, error: 'Missing credentials.' });
 
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
-
-        const version = await qbittorrentFetch({
-            baseUrl: q.url,
-            path: '/api/v2/app/version',
-            cookie,
-            agent,
-        });
-
+        const version = await qbittorrentRequest(q, { path: '/api/v2/app/version' });
         let transferInfo = null;
         try {
-            const raw = await qbittorrentFetch({
-                baseUrl: q.url,
-                path: '/api/v2/transfer/info',
-                cookie,
-                agent,
-            });
+            const raw = await qbittorrentRequest(q, { path: '/api/v2/transfer/info' });
             transferInfo = JSON.parse(raw);
         } catch {
             transferInfo = null;
@@ -3841,17 +3795,10 @@ app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req
         console.log('[Integrations][qBittorrent] bind-vpn request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
-        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        if ((!q.username || !q.password) && !q.apiKey) return res.status(400).json({ error: 'qBittorrent credentials missing.' });
 
         const netInterface = String(req.body?.net_interface || 'tun0');
         const bindIp = String(req.body?.net_bind_ip || '');
-
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
 
         const prefs = {
             current_network_interface: netInterface,
@@ -3863,14 +3810,7 @@ app.post('/api/integrations/qbittorrent/bind-vpn', authenticateToken, async (req
         const form = new URLSearchParams();
         form.set('json', JSON.stringify(prefs));
 
-        await qbittorrentFetch({
-            baseUrl: q.url,
-            path: '/api/v2/app/setPreferences',
-            method: 'POST',
-            cookie,
-            agent,
-            form,
-        });
+        await qbittorrentRequest(q, { path: '/api/v2/app/setPreferences', method: 'POST', form });
 
         console.log('[Integrations][qBittorrent] bind-vpn applied:', JSON.stringify(prefs));
         res.json({ ok: true, applied: prefs });
@@ -3886,19 +3826,12 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
         console.log('[Integrations][qBittorrent] details request');
         if (!q.enabled) return res.json({ enabled: false });
         if (!q.url) return res.json({ enabled: true, configured: false });
-        if (!q.username || !q.password) return res.json({ configured: true, ok: false, error: 'Missing username or password.' });
-
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
+        if ((!q.username || !q.password) && !q.apiKey) return res.json({ configured: true, ok: false, error: 'Missing credentials.' });
 
         const [versionRaw, transferRaw, prefsRaw] = await Promise.all([
-            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/version', cookie, agent }),
-            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/transfer/info', cookie, agent }),
-            qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent }),
+            qbittorrentRequest(q, { path: '/api/v2/app/version' }),
+            qbittorrentRequest(q, { path: '/api/v2/transfer/info' }),
+            qbittorrentRequest(q, { path: '/api/v2/app/preferences' }),
         ]);
 
         let transferInfo = null;
@@ -3910,7 +3843,7 @@ app.get('/api/integrations/qbittorrent/details', authenticateToken, async (req, 
         try {
             const r = await qbittorrentEnsureBindTun0(q, preferences);
             if (r?.changed) {
-                const prefsRaw2 = await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/app/preferences', cookie, agent });
+                const prefsRaw2 = await qbittorrentRequest(q, { path: '/api/v2/app/preferences' });
                 try { preferences = JSON.parse(prefsRaw2); } catch { /* keep old */ }
             }
         } catch (e) {
@@ -3946,16 +3879,10 @@ app.post('/api/integrations/qbittorrent/torrents/pause-all', authenticateToken, 
         console.log('[Integrations][qBittorrent] pause-all request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
-        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
-        const form = new URLSearchParams();
-        form.set('hashes', 'all');
-        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/pause', method: 'POST', cookie, agent, form });
+        if ((!q.username || !q.password) && !q.apiKey) return res.status(400).json({ error: 'qBittorrent credentials missing.' });
+        
+        await qbittorrentPauseAll(q);
+        
         console.log('[Integrations][qBittorrent] pause-all applied');
         res.json({ ok: true });
     } catch (e) {
@@ -3970,16 +3897,10 @@ app.post('/api/integrations/qbittorrent/torrents/resume-all', authenticateToken,
         console.log('[Integrations][qBittorrent] resume-all request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
-        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
-        const { cookie, agent } = await qbittorrentLoginCookie({
-            baseUrl: q.url,
-            username: q.username,
-            password: q.password,
-            insecureTls: q.insecureTls,
-        });
-        const form = new URLSearchParams();
-        form.set('hashes', 'all');
-        await qbittorrentFetch({ baseUrl: q.url, path: '/api/v2/torrents/resume', method: 'POST', cookie, agent, form });
+        if ((!q.username || !q.password) && !q.apiKey) return res.status(400).json({ error: 'qBittorrent credentials missing.' });
+        
+        await qbittorrentResumeAll(q);
+        
         console.log('[Integrations][qBittorrent] resume-all applied');
         res.json({ ok: true });
     } catch (e) {
@@ -3994,7 +3915,7 @@ app.post('/api/integrations/qbittorrent/sync-port-forward', authenticateToken, a
         console.log('[Integrations][qBittorrent] sync-port-forward request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
-        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        if ((!q.username || !q.password) && !q.apiKey) return res.status(400).json({ error: 'qBittorrent credentials missing.' });
         const port = Number(lastForwardedPort);
         if (!Number.isFinite(port) || port <= 0) {
             return res.status(400).json({ error: 'No forwarded port detected from the VPN monitor.' });
@@ -4014,7 +3935,7 @@ app.post('/api/integrations/qbittorrent/apply-safe-defaults', authenticateToken,
         console.log('[Integrations][qBittorrent] apply-safe-defaults request');
         if (!q.enabled) return res.status(400).json({ error: 'qBittorrent integration is disabled.' });
         if (!q.url) return res.status(400).json({ error: 'qBittorrent URL is not set.' });
-        if (!q.username || !q.password) return res.status(400).json({ error: 'qBittorrent username/password missing.' });
+        if ((!q.username || !q.password) && !q.apiKey) return res.status(400).json({ error: 'qBittorrent credentials missing.' });
         const applied = await qbittorrentApplySafeDefaults(q);
         console.log('[Integrations][qBittorrent] apply-safe-defaults applied');
         res.json({ ok: true, applied });
