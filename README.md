@@ -15,6 +15,7 @@ A web UI for [**Gluetun**](https://github.com/qdm12/gluetun): change VPN setting
 2. **Project folder** — Clone this repo **or** copy [`docker-compose.yml`](docker-compose.yml) into a folder that has an empty **`data/`** directory next to the compose file (the repo already has `data/` for local dev; for a minimal deploy, `mkdir data` is enough).
 
 3. **Start the stack**
+
    ```bash
    docker compose pull
    docker compose up -d
