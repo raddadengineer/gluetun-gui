@@ -35,6 +35,13 @@ export function ToastProvider({ children }) {
     [],
   );
 
+  const dismissToast = useCallback((id) => {
+    const tid = timersRef.current.get(id);
+    if (tid) clearTimeout(tid);
+    timersRef.current.delete(id);
+    setToasts((p) => p.filter((x) => x.id !== id));
+  }, []);
+
   useEffect(() => () => {
     timersRef.current.forEach((t) => clearTimeout(t));
     timersRef.current.clear();
@@ -80,7 +87,15 @@ export function ToastProvider({ children }) {
             <span className="material-icons-round">
               {ICON_BY_TYPE[t.type] || ICON_BY_TYPE.info}
             </span>
-            {t.message}
+            <span className="toast-message">{t.message}</span>
+            <button
+              className="toast-dismiss"
+              onClick={() => dismissToast(t.id)}
+              aria-label="Dismiss notification"
+              title="Dismiss"
+            >
+              <span className="material-icons-round" style={{ fontSize: '16px' }}>close</span>
+            </button>
           </div>
         ))}
       </div>
@@ -89,3 +104,4 @@ export function ToastProvider({ children }) {
 }
 
 export const useToast = () => useContext(ToastContext);
+

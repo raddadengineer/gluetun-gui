@@ -634,7 +634,7 @@ export default function Settings() {
       .catch(console.error);
 
     // Fetch PIA WireGuard regions via backend proxy (avoids CORS)
-    fetch('/api/pia/regions')
+    fetch('/api/pia/regions', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
       .then(regions => { if (Array.isArray(regions)) setPiaRegions(regions); })
       .catch(console.error);
@@ -684,8 +684,9 @@ export default function Settings() {
   const fetchPiaRegions = async () => {
     setFetchingPiaWgRegions(true);
     try {
+      const token = localStorage.getItem('token');
       const pfQ = piaPortForwarding ? '?portForwardOnly=1' : '';
-      const res = await fetch(`/api/pia/regions${pfQ}`);
+      const res = await fetch(`/api/pia/regions${pfQ}`, { headers: { 'Authorization': `Bearer ${token}` } });
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new Error(`Failed to fetch PIA regions (${res.status})${text ? `: ${text}` : ''}`);
@@ -2795,6 +2796,25 @@ export default function Settings() {
                       <div className="form-group">
                         <label>Password</label>
                         <input type="password" name="GUI_QBITTORRENT_PASSWORD" value={config.GUI_QBITTORRENT_PASSWORD || ''} onChange={handleChange} className="text-input" placeholder="WebUI password" />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', marginTop: '16px' }}>
+                      <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '16px' }}>
+                          <hr style={{ flex: 1, borderTop: '1px solid var(--border)' }} />
+                          <span style={{ color: 'var(--text-muted)', fontSize: '13px', fontWeight: 'bold' }}>OR</span>
+                          <hr style={{ flex: 1, borderTop: '1px solid var(--border)' }} />
+                        </div>
+                      </div>
+                      <div className="form-group" style={{ gridColumn: '1 / -1' }}>
+                        <label>
+                          API Key <span style={{ color: 'var(--text-muted)', fontWeight: 'normal', fontSize: '13px' }}>(v5.2.0+)</span>
+                        </label>
+                        <input type="password" name="GUI_QBITTORRENT_API_KEY" value={config.GUI_QBITTORRENT_API_KEY || ''} onChange={handleChange} className="text-input" placeholder="Overrides Username/Password" />
+                        <p style={{ marginTop: '6px', fontSize: '13px', color: 'var(--text-muted)' }}>
+                          Stateless authentication. Leave Username/Password blank if using an API Key.
+                        </p>
                       </div>
                     </div>
 

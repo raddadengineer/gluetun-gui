@@ -9,6 +9,20 @@ set -euo pipefail
 #   IMG=raddadengineer/gluetun-gui TAG=v0.4.2 PUSH=1 ./build.sh
 #   IMG=raddadengineer/gluetun-gui TAG=v0.4.2 PLATFORMS=linux/amd64,linux/arm64 PUSH=1 ./build.sh
 #
+# For arm64 builds on a Mac (Intel):
+#   docker buildx create --name mybuilder --use
+#   docker buildx inspect --bootstrap mybuilder
+#   IMG=raddadengineer/gluetun-gui TAG=v0.4.2 PLATFORMS=linux/arm64 ./build.sh
+#
+# For arm64 builds on a Mac (Apple Silicon):
+#   docker buildx create --name mybuilder --use
+#   docker buildx inspect --bootstrap mybuilder
+#   IMG=raddadengineer/gluetun-gui TAG=v0.4.2 PLATFORMS=linux/arm64 ./build.sh
+#
+# For multiple platforms:
+#    PLATFORMS=linux/amd64,linux/arm64 PUSH=1 ./build.sh
+# 
+#
 # Env vars:
 #   IMG        Image repo/name (default: raddadengineer/gluetun-gui)
 #   TAG        Tag (default: v<server/package.json version>)

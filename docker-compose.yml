@@ -5,10 +5,43 @@ services:
     restart: unless-stopped
     # On container recreate, ensure Gluetun starts with the last saved VPN settings.
     # The GUI will still update/recreate the container dynamically as needed.
+    #
+    # BOOTSTRAP: If data/gluetun.env is empty or missing VPN_SERVICE_PROVIDER,
+    # Gluetun will exit immediately. The entrypoint below seeds a safe "unconfigured"
+    # placeholder so Gluetun stays running (in a retry loop) until the GUI writes
+    # a real config and recreates the container.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ENV_FILE="/gluetun/gluetun.env"
+        # Seed placeholder only when the file is absent or lacks a VPN provider.
+        if ! grep -qE '^VPN_SERVICE_PROVIDER=.+' "$$ENV_FILE" 2>/dev/null; then
+          echo "[bootstrap] No VPN config found - writing placeholder so Gluetun stays alive."
+          printf '%s\n' \
+            '# Placeholder written by gluetun-gui bootstrap.' \
+            '# Open the GUI (port 3000) to configure your real VPN settings.' \
+            'VPN_SERVICE_PROVIDER=custom' \
+            'VPN_TYPE=wireguard' \
+            'WIREGUARD_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
+            'WIREGUARD_ADDRESSES=10.0.0.2/32' \
+            'WIREGUARD_ENDPOINT_IP=127.0.0.1' \
+            'WIREGUARD_ENDPOINT_PORT=51820' \
+            'WIREGUARD_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
+            > "$$ENV_FILE"
+          echo "[bootstrap] Placeholder written. Open the GUI (port 3000) to configure your VPN."
+        fi
+        exec /gluetun-entrypoint
+    volumes:
+      # Share the persistent gluetun.env into the container so the bootstrap
+      # entrypoint can inspect and seed it before Gluetun reads it.
+      - ./data:/gluetun
     env_file:
-      - ./data/gluetun.env
+      - path: ./data/gluetun.env
+        required: false # On first boot the file may not exist yet; the entrypoint seeds it.
     cap_add:
       - NET_ADMIN
+      - NET_RAW
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
@@ -16,24 +49,26 @@ services:
       - "8388:8388/tcp" # Shadowsocks
       - "8388:8388/udp" # Shadowsocks
       - "8081:8081/tcp" # qBittorrent WebUI (published on gluetun)
-    # NOTE: No env_file needed — the GUI manages Gluetun's
-    # environment variables dynamically via Docker API.
+    # NOTE: The GUI manages Gluetun's environment variables dynamically via Docker API.
     # On first run, set initial VPN config through the GUI (port 3000).
     healthcheck:
       # Healthy once tunnel interface appears (tun0 for OpenVPN, wg0 for WireGuard).
       # This avoids relying on the control server, which may be disabled or auth-gated.
-      test: ["CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev"]
+      test: [ "CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev" ]
       interval: 10s
       timeout: 5s
       retries: 60
       start_period: 120s
+    networks: [ vpn-stack ]
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
     container_name: qbittorrent
     network_mode: "service:gluetun"
     depends_on:
-      - gluetun
+      gluetun:
+        condition: service_healthy
+        restart: true
     entrypoint:
       - /bin/sh
       - -lc
@@ -52,9 +87,9 @@ services:
         echo "[qbittorrent] tunnel detected; starting qBittorrent." >&2
         exec /init
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=America/Chicago
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
+      - TZ=${TZ:-America/Chicago}
       - WEBUI_PORT=8081
     volumes:
       - ./data/qbittorrent-config:/config
@@ -64,6 +99,10 @@ services:
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
     container_name: gluetun-gui
+    labels:
+      org.opencontainers.image.title: "Gluetun GUI"
+      org.opencontainers.image.description: "Web UI for managing Gluetun VPN container"
+      org.opencontainers.image.source: "https://github.com/raddadengineer/gluetun-gui"
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -80,4 +119,12 @@ services:
       # Optional: JWT lifetime (e.g. 12h, 7d). Default 24h.
       # - JWT_EXPIRES_IN=24h
     depends_on:
-      - gluetun
+      gluetun:
+        # Use service_started (not service_healthy) so gluetun-gui always launches
+        # even when Gluetun is still connecting or hasn't been configured yet.
+        condition: service_started
+    networks: [ vpn-stack ]
+
+networks:
+  vpn-stack:
+    driver: bridge

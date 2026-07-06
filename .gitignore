@@ -8,3 +8,7 @@ node_modules/
 data/
 sessions.json
 **/gui-homelab-state.json
+
+# Root-level env files that may contain credentials (data/ is already ignored)
+gui-settings.env
+gluetun.env

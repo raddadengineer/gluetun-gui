@@ -7,6 +7,7 @@ export default function Login() {
 
   const handleLogin = async (e) => {
     e.preventDefault();
+    if (loading) return; // BUG 20: prevent double-submit via keyboard Enter while button is disabled
     setLoading(true);
     setError('');
 
@@ -21,6 +22,8 @@ export default function Login() {
       if (res.ok) {
         localStorage.setItem('token', data.token);
         window.location.href = '/'; // Full reload to initialize protected state smoothly
+      } else if (data.needsSetup) {
+        setError('No password is configured yet. Set GUI_PASSWORD in your gui-config.env file and restart the container.');
       } else {
         setError(data.error || 'Login failed');
       }
@@ -42,14 +45,16 @@ export default function Login() {
 
         <form onSubmit={handleLogin}>
           <div className="form-group" style={{ textAlign: 'left', marginBottom: '24px' }}>
-            <label>Master Password</label>
-            <input 
-              type="password" 
-              className="text-input" 
-              value={password} 
+            <label htmlFor="gui-password">Master Password</label>
+            <input
+              id="gui-password"
+              type="password"
+              className="text-input"
+              value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter GUI Password"
-              required 
+              autoComplete="current-password"
+              required
             />
           </div>
           
