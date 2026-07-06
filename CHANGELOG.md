@@ -8,6 +8,8 @@ where version tags exist.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-07-06
+
 ### Added
 
 - **Environment customizability**: added `GLUETUN_CONTAINER_NAME` variable to override the target container name, and `PORT` variable to customize the HTTP API port.
