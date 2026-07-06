@@ -296,6 +296,33 @@ if (DATA_DIR) {
     }
 }
 
+// ── Bootstrap: seed a placeholder gluetun.env on fresh deploy ─────────────────
+// If gluetun.env is absent or has no VPN_SERVICE_PROVIDER, Gluetun exits
+// immediately on first boot. Seed a safe placeholder so it stays alive (albeit
+// not tunnelling) until the user configures real VPN settings via the GUI.
+// The docker-compose entrypoint wrapper does the same at the container level,
+// but this covers the case where the GUI container starts first.
+if (!fs.existsSync(GLUETUN_ENV_PATH)) {
+    const placeholder = [
+        '# Placeholder written by gluetun-gui on first boot.',
+        '# Open the GUI (port 3000) to configure your real VPN settings.',
+        '# This file will be overwritten once you save a configuration.',
+        'VPN_SERVICE_PROVIDER=custom',
+        'VPN_TYPE=wireguard',
+        'WIREGUARD_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        'WIREGUARD_ADDRESSES=10.0.0.2/32',
+        'WIREGUARD_ENDPOINT_IP=127.0.0.1',
+        'WIREGUARD_ENDPOINT_PORT=51820',
+        'WIREGUARD_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    ].join('\n') + '\n';
+    try {
+        fs.writeFileSync(GLUETUN_ENV_PATH, placeholder, 'utf8');
+        console.log('[Init] Seeded placeholder gluetun.env — configure VPN via the GUI.');
+    } catch (e) {
+        console.warn('[Init] Could not seed placeholder gluetun.env:', e.message);
+    }
+}
+
 console.log(`[Init] ENV_PATH: ${ENV_PATH}`);
 console.log(`[Init] SESSIONS_PATH: ${SESSIONS_PATH}`);
 console.log(`[Init] GLUETUN_ENV_PATH: ${GLUETUN_ENV_PATH}`);
