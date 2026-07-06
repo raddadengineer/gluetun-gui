@@ -31,14 +31,14 @@ services:
             > "$$ENV_FILE"
           echo "[bootstrap] Placeholder written. Open the GUI (port 3000) to configure your VPN."
         fi
-        exec /gluetun
+        exec /gluetun-entrypoint
     volumes:
       # Share the persistent gluetun.env into the container so the bootstrap
       # entrypoint can inspect and seed it before Gluetun reads it.
       - ./data:/gluetun
     env_file:
       - path: ./data/gluetun.env
-        required: false  # On first boot the file may not exist yet; the entrypoint seeds it.
+        required: false # On first boot the file may not exist yet; the entrypoint seeds it.
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -54,12 +54,12 @@ services:
     healthcheck:
       # Healthy once tunnel interface appears (tun0 for OpenVPN, wg0 for WireGuard).
       # This avoids relying on the control server, which may be disabled or auth-gated.
-      test: ["CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev"]
+      test: [ "CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev" ]
       interval: 10s
       timeout: 5s
       retries: 60
       start_period: 120s
-    networks: [vpn-stack]
+    networks: [ vpn-stack ]
 
   qbittorrent:
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -123,7 +123,7 @@ services:
         # Use service_started (not service_healthy) so gluetun-gui always launches
         # even when Gluetun is still connecting or hasn't been configured yet.
         condition: service_started
-    networks: [vpn-stack]
+    networks: [ vpn-stack ]
 
 networks:
   vpn-stack:
