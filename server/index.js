@@ -8,9 +8,38 @@ const { exec, execFile } = require('child_process');
 const https = require('https');
 const http = require('http');
 
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+
 const app = express();
-app.use(cors());
+
+// Security headers
+app.use(helmet({
+    contentSecurityPolicy: false, // SPA handles its own CSP
+    crossOriginEmbedderPolicy: false,
+}));
+
+// CORS — restrict to the configured origin (or localhost in dev)
+app.use(cors({
+    origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    credentials: true,
+}));
+
 app.use(express.json());
+
+// Rate limiter for the login endpoint — 20 attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many login attempts. Please wait 15 minutes.' },
+});
+
+// Public: lightweight liveness probe for Docker HEALTHCHECK and load balancers
+app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, ts: Date.now() });
+});
 
 // Public: safe metadata for the About page (no secrets)
 app.get('/api/about', async (req, res) => {
@@ -112,20 +141,55 @@ async function getAboutInfo() {
     return info;
 }
 
-const JWT_SECRET =
-    process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim()
-        ? String(process.env.JWT_SECRET).trim()
-        : 'gluetun-gui-super-secret-key';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN && String(process.env.JWT_EXPIRES_IN).trim() ? String(process.env.JWT_EXPIRES_IN).trim() : '24h';
+// ── JWT configuration ─────────────────────────────────────────────────────────────────────────────────
+// If JWT_SECRET is not explicitly set, auto-generate a random one and persist it
+// to DATA_DIR so it survives server restarts within the same deployment.
+// Refusing to start with a hardcoded fallback prevents token-forgery attacks.
+function loadOrGenerateJwtSecret() {
+    const envVal = process.env.JWT_SECRET && String(process.env.JWT_SECRET).trim();
+    if (envVal) return envVal;
+    // Try to load a previously generated secret from disk.
+    const secretPath = DATA_DIR ? path.join(DATA_DIR, '.jwt_secret') : null;
+    if (secretPath) {
+        try {
+            if (fs.existsSync(secretPath)) {
+                const stored = fs.readFileSync(secretPath, 'utf8').trim();
+                if (stored.length >= 32) {
+                    console.log('[JWT] Loaded persisted JWT secret from disk.');
+                    return stored;
+                }
+            }
+        } catch { /* fall through to generate */ }
+        // Generate a new random secret and persist it.
+        try {
+            const { randomBytes } = require('crypto');
+            const generated = randomBytes(48).toString('hex');
+            fs.writeFileSync(secretPath, generated, { mode: 0o600 });
+            console.log('[JWT] Generated new random JWT secret and persisted to disk.');
+            return generated;
+        } catch (e) {
+            console.error('[JWT] Failed to persist JWT secret:', e.message, '— using in-memory only.');
+            const { randomBytes } = require('crypto');
+            return randomBytes(48).toString('hex');
+        }
+    }
+    // No DATA_DIR — generate in-memory (tokens invalidate on restart).
+    console.warn('[JWT] DATA_DIR not set — JWT secret is ephemeral and will change on restart.');
+    const { randomBytes } = require('crypto');
+    return randomBytes(48).toString('hex');
+}
 
 // ─── Data Directory ───────────────────────────────────────────────────────────
 // DATA_DIR env var centralises all persistent state under one folder.
 // Falls back to legacy paths for backward compatibility.
+// Must be declared BEFORE loadOrGenerateJwtSecret() is called.
 const DATA_DIR = process.env.DATA_DIR || null;
 if (DATA_DIR && !fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
     console.log(`[Init] Created data directory: ${DATA_DIR}`);
 }
+const JWT_SECRET = loadOrGenerateJwtSecret();
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN && String(process.env.JWT_EXPIRES_IN).trim() ? String(process.env.JWT_EXPIRES_IN).trim() : '24h';
 
 const ENV_PATH = DATA_DIR
     ? path.join(DATA_DIR, 'gui-config.env')
@@ -480,11 +544,18 @@ loadSessions();
 // Initialize Docker instance
 const docker = new Docker();
 
+// Container name can be overridden via GLUETUN_CONTAINER_NAME for multi-instance setups.
+const GLUETUN_CONTAINER_NAME = process.env.GLUETUN_CONTAINER_NAME || 'gluetun';
+
 function findGluetunEngineContainer(containers) {
-    // Prefer exact compose name `/gluetun`, otherwise fall back to "gluetun but not gui"
-    return (
-        containers.find(c => (c.Names || []).some(n => n === '/gluetun')) ||
-        containers.find(c => (c.Names || []).some(n => n.includes('gluetun') && !n.includes('gui')))
+    // 1. Exact match on GLUETUN_CONTAINER_NAME (configurable, defaults to 'gluetun')
+    const exactMatch = containers.find(c =>
+        (c.Names || []).some(n => n === `/${GLUETUN_CONTAINER_NAME}`)
+    );
+    if (exactMatch) return exactMatch;
+    // 2. Fallback: any container with 'gluetun' in the name that isn't the GUI
+    return containers.find(c =>
+        (c.Names || []).some(n => n.toLowerCase().includes('gluetun') && !n.toLowerCase().includes('gui'))
     );
 }
 
@@ -510,21 +581,30 @@ const authenticateToken = (req, res, next) => {
 };
 
 // Login Endpoint
-app.post('/api/login', (req, res) => {
+app.post('/api/login', loginLimiter, (req, res) => {
     const { password } = req.body;
 
-    let expectedPassword = 'gluetun-admin';
+    // Read GUI_PASSWORD from env file; use .slice(1).join('=') to handle passwords
+    // that contain '=' signs (e.g. base64 strings) — fixes audit finding SEC-8.
+    let expectedPassword = null;
     if (fs.existsSync(ENV_PATH)) {
         const data = fs.readFileSync(ENV_PATH, 'utf8');
         data.split('\n').forEach(line => {
             if (line.trim().startsWith('GUI_PASSWORD=')) {
-                expectedPassword = line.split('=')[1].trim();
+                expectedPassword = line.split('=').slice(1).join('=').trim();
             }
         });
     }
 
+    // No password configured — refuse login and direct user to set one.
+    if (!expectedPassword) {
+        return res.status(403).json({
+            error: 'No password is configured. Set GUI_PASSWORD in Settings → Authentication, then restart.',
+            needsSetup: true,
+        });
+    }
+
     if (password === expectedPassword) {
-        // Issue token valid for 24 hours
         const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
         res.json({ token, message: 'Authenticated Successfully' });
     } else {
@@ -781,6 +861,8 @@ app.get('/api/logs', authenticateToken, async (req, res) => {
             logStreams.forEach(s => s.destroy());
         });
     } catch (err) {
+        // Destroy any streams that were opened before the error occurred
+        logStreams.forEach(s => { try { s.destroy(); } catch { /* ignore */ } });
         res.write(`data: ${JSON.stringify("[ERROR] " + err.message)}\n\n`);
     }
 });
@@ -820,7 +902,7 @@ async function recreateGluetunContainerCore(newEnvObj) {
     const oldGluetunName = String(inspectData?.Name || '').replace(/^\//, '') || 'gluetun';
 
     try {
-        await oldContainer.stop();
+        await oldContainer.stop({ t: 15 }); // 15-second stop timeout before SIGKILL
     } catch (e) {
         if (e.statusCode !== 304 && !String(e.message || '').includes('is not running')) {
             console.warn('[Recreate] stop warning:', e.message);
@@ -2357,7 +2439,7 @@ async function fetchGluetunServers() {
         const opts = {
             headers: { 'User-Agent': 'gluetun-gui/1.0 (+https://github.com/qdm12/gluetun)' },
         };
-        https.get(url, opts, (res) => {
+        const req = https.get(url, opts, (res) => {
             if (res.statusCode !== 200) return reject(new Error('Failed to fetch servers.json'));
             let data = '';
             res.on('data', chunk => data += chunk);
@@ -2371,6 +2453,7 @@ async function fetchGluetunServers() {
                 }
             });
         }).on('error', reject);
+        req.setTimeout(20000, () => { req.destroy(new Error('fetchGluetunServers timeout after 20s')); });
     }).finally(() => {
         fetchGluetunServersInFlight = null;
     });
@@ -2781,7 +2864,7 @@ async function applyPiaWireguardFromCredentialsCore({
     let privateKey = '', address = '', endpoint = '', publicKey = '', serverName = null;
     if (fs.existsSync(wgConfPath)) {
         const wgConf = fs.readFileSync(wgConfPath, 'utf8');
-        console.log('[PIA-WG] Generated wg0.conf:', wgConf);
+        console.log('[PIA-WG] Generated wg0.conf:', wgConf.replace(/^PrivateKey\s*=.*/m, 'PrivateKey = [REDACTED]'));
 
         const pkMatch = wgConf.match(/PrivateKey\s*=\s*(.+)/);
         if (pkMatch) privateKey = pkMatch[1].trim();
@@ -2954,7 +3037,6 @@ app.get('/api/pia/status', authenticateToken, (req, res) => {
 // force the server to make outbound requests to piaservers.net.
 app.get('/api/pia/regions', authenticateToken, async (req, res) => {
     try {
-        const https = require('https');
         const portForwardOnly = req.query.portForwardOnly === '1' || req.query.portForwardOnly === 'true';
         const data = await new Promise((resolve, reject) => {
             https.get('https://serverlist.piaservers.net/vpninfo/servers/v6', (resp) => {
@@ -4096,8 +4178,8 @@ setInterval(() => {
     });
 }, 45000);
 
-const PORT = 3000;
-app.listen(PORT, () => {
+const PORT = parseInt(process.env.PORT || '3000', 10);
+const server = app.listen(PORT, () => {
     console.log(`Gluetun GUI API server running on http://localhost:${PORT}`);
     try {
         maybeRunScheduledBackup();
@@ -4110,3 +4192,26 @@ app.listen(PORT, () => {
         maybeAutostartGluetunOnStartup().catch((e) => console.error('[Startup] Autostart crashed:', e.message));
     }, getAutostartDelayMs());
 });
+
+// ── Graceful Shutdown ────────────────────────────────────────────────────────────────────────────
+function gracefulShutdown(signal) {
+    console.log(`[Shutdown] ${signal} received — shutting down gracefully.`);
+    // Flush session data before exit
+    try { saveSessions(); } catch { /* best-effort */ }
+    // Destroy any open SSE log streams
+    try {
+        if (Array.isArray(logStreams)) logStreams.forEach(s => { try { s.destroy(); } catch { /* ignore */ } });
+    } catch { /* ignore */ }
+    server.close((err) => {
+        if (err) console.error('[Shutdown] Error closing server:', err.message);
+        console.log('[Shutdown] HTTP server closed. Exiting.');
+        process.exit(0);
+    });
+    // Force exit after 10s if server.close() hangs
+    setTimeout(() => {
+        console.error('[Shutdown] Forced exit after timeout.');
+        process.exit(1);
+    }, 10000).unref();
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
