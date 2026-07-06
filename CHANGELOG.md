@@ -8,6 +8,22 @@ where version tags exist.
 
 ## [Unreleased]
 
+### Added
+
+- **Environment customizability**: added `GLUETUN_CONTAINER_NAME` variable to override the target container name, and `PORT` variable to customize the HTTP API port.
+
+### Changed
+
+- **Persistent JWT Secret**: if `DATA_DIR` is set, a random JWT secret is generated and persisted in `jwt-secret` so logins persist across container restarts.
+- **Graceful Shutdown**: the server now cleanly flushes sessions and terminates SSE connections on `SIGTERM` / `SIGINT`.
+
+### Fixed
+
+- **Docker Compose entrypoint binary**: corrected the `gluetun` entrypoint wrapper to run `/gluetun-entrypoint` instead of the `/gluetun` directory.
+- **Bootstrap Seeding**: automatically seeds a safe placeholder `gluetun.env` both in Docker Compose and at server initialization to prevent immediate container exits during fresh setup.
+- **Password edge cases**: parsed `GUI_PASSWORD` allowing passwords containing `=` characters (fixes audit finding SEC-8).
+- **Security Hardening**: added `Helmet` HTTP headers middleware and configured login rate limiting via `express-rate-limit`.
+
 ## [0.4.3] — 2026-04-24
 
 ### Added

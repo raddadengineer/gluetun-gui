@@ -31,7 +31,7 @@ flowchart LR
 |--------|------|
 | **UI (`app/`)** | React (Vite). JWT in `localStorage`. Themes and notification prefs in `localStorage`. SSE for `/api/logs`. |
 | **API (`server/index.js`)** | Express: config, Docker lifecycle, PIA automation, sessions, monitoring loop, static SPA in production. |
-| **Engine container** | Resolved as `findGluetunEngineContainer()`: prefers name `/gluetun`, else first `gluetun` name not containing `gui`. Metrics, status, and monitor target this container. |
+| **Engine container** | Resolved as `findGluetunEngineContainer()`: prefers name matching `GLUETUN_CONTAINER_NAME` environment variable (defaults to `gluetun`), else falls back to the first container containing `gluetun` in its name that is not the GUI. Metrics, status, and monitor target this container. |
 
 ### Persistence (`DATA_DIR` or legacy paths)
 

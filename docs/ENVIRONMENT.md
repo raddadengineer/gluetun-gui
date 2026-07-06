@@ -10,8 +10,10 @@ Variables fall into two groups:
 | Variable | Required | Default | Purpose |
 | --- | --- | --- | --- |
 | **`DATA_DIR`** | Recommended | _(unset)_ | Directory for `gui-config.env`, `sessions.json`, `wireguard/`, backups, homelab state, etc. |
-| **`JWT_SECRET`** | Recommended in prod | built-in dev secret | HMAC secret for issued JWTs. |
+| **`JWT_SECRET`** | Recommended in prod | _(persisted random)_ | HMAC secret for issued JWTs. If unset, a random secret is generated and stored in `${DATA_DIR}/jwt-secret` (or kept ephemeral in memory if `DATA_DIR` is unset). |
 | **`JWT_EXPIRES_IN`** | No | `24h` | JWT lifetime (e.g. `12h`, `7d`). |
+| **`PORT`** | No | `3000` | Port the GUI server listens on inside the container. |
+| **`GLUETUN_CONTAINER_NAME`** | No | `gluetun` | Name of the target Gluetun container to manage. |
 
 If **`DATA_DIR`** is unset, legacy paths under `server/` may be used — prefer **`DATA_DIR=/data`** plus a volume mount.
 

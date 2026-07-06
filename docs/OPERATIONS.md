@@ -38,7 +38,7 @@ If older layouts used `server/.env` or `sessions.json` next to the server only, 
 
 ## Security and automation
 
-- **JWT signing:** Set **`JWT_SECRET`** (and optionally **`JWT_EXPIRES_IN`**, e.g. `12h` or `7d`) on the **gluetun-gui** container environment. If unset, a built-in development default is used (tokens survive image rebuilds until expiry).
+- **JWT signing:** Set **`JWT_SECRET`** (and optionally **`JWT_EXPIRES_IN`**, e.g. `12h` or `7d`) on the **gluetun-gui** container environment. If unset, the server generates a persistent random secret saved to `${DATA_DIR}/jwt-secret` so sessions persist across restarts (or an ephemeral in-memory secret if `DATA_DIR` is unset).
 - **TLS:** Put the GUI behind a reverse proxy with HTTPS for anything beyond a trusted LAN. See **[REVERSE-PROXY.md](REVERSE-PROXY.md)** (including **SSE** for `/api/logs`).
 - **Save confirmation:** **Settings → Save** opens a diff of `gui-config.env` keys (secrets redacted) before recreating Gluetun.
 - **Outbound webhooks:** Optional **`GUI_NOTIFY_WEBHOOK_URL`** receives JSON POSTs for monitor events (`gluetun_container_missing`, `vpn_connectivity_failed`, `vpn_connectivity_recovered`, `port_forwarding_failed`). Optional **`GUI_NOTIFY_WEBHOOK_SECRET`** is sent as `Authorization: Bearer …`. Optional **quiet hours** (server clock): **`GUI_NOTIFY_QUIET_ENABLED`** (`on`/`true`), **`GUI_NOTIFY_QUIET_START`**, **`GUI_NOTIFY_QUIET_END`** (`HH:MM`) — no webhook POSTs are sent during that window.
