@@ -1,94 +1,35 @@
+version: "3.9"
+
 services:
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
     restart: unless-stopped
-    # On container recreate, ensure Gluetun starts with the last saved VPN settings.
-    # The GUI will still update/recreate the container dynamically as needed.
-    #
-    # BOOTSTRAP: If data/gluetun.env is empty or missing VPN_SERVICE_PROVIDER,
-    # Gluetun will exit immediately. The entrypoint below seeds a safe "unconfigured"
-    # placeholder so Gluetun stays running (in a retry loop) until the GUI writes
-    # a real config and recreates the container.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        ENV_FILE="/gluetun/gluetun.env"
-        # Seed placeholder only when the file is absent or lacks a VPN provider.
-        if ! grep -qE '^VPN_SERVICE_PROVIDER=.+' "$$ENV_FILE" 2>/dev/null; then
-          echo "[bootstrap] No VPN config found - writing placeholder so Gluetun stays alive."
-          printf '%s\n' \
-            '# Placeholder written by gluetun-gui bootstrap.' \
-            '# Open the GUI (port 3000) to configure your real VPN settings.' \
-            'VPN_SERVICE_PROVIDER=custom' \
-            'VPN_TYPE=wireguard' \
-            'WIREGUARD_PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
-            'WIREGUARD_ADDRESSES=10.0.0.2/32' \
-            'WIREGUARD_ENDPOINT_IP=127.0.0.1' \
-            'WIREGUARD_ENDPOINT_PORT=51820' \
-            'WIREGUARD_PUBLIC_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' \
-            > "$$ENV_FILE"
-          echo "[bootstrap] Placeholder written. Open the GUI (port 3000) to configure your VPN."
-        fi
-        exec /gluetun-entrypoint
-    volumes:
-      # Share the persistent gluetun.env into the container so the bootstrap
-      # entrypoint can inspect and seed it before Gluetun reads it.
-      - ./data:/gluetun
-    env_file:
-      - path: ./data/gluetun.env
-        required: false # On first boot the file may not exist yet; the entrypoint seeds it.
     cap_add:
       - NET_ADMIN
-      - NET_RAW
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - "8888:8888/tcp" # HTTP proxy
-      - "8388:8388/tcp" # Shadowsocks
-      - "8388:8388/udp" # Shadowsocks
-      - "8081:8081/tcp" # qBittorrent WebUI (published on gluetun)
-    # NOTE: The GUI manages Gluetun's environment variables dynamically via Docker API.
-    # On first run, set initial VPN config through the GUI (port 3000).
-    healthcheck:
-      # Healthy once tunnel interface appears (tun0 for OpenVPN, wg0 for WireGuard).
-      # This avoids relying on the control server, which may be disabled or auth-gated.
-      test: [ "CMD-SHELL", "grep -qE '^\\s*(tun0|wg0):' /proc/net/dev" ]
-      interval: 10s
-      timeout: 5s
-      retries: 60
-      start_period: 120s
-    networks: [ vpn-stack ]
+      - 8888:8888/tcp
+      - 8388:8388/tcp
+      - 8388:8388/udp
+      - 8080:8080/tcp
+
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
     container_name: gluetun-gui
-    labels:
-      org.opencontainers.image.title: "Gluetun GUI"
-      org.opencontainers.image.description: "Web UI for managing Gluetun VPN container"
-      org.opencontainers.image.source: "https://github.com/raddadengineer/gluetun-gui"
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3011:3000"
     volumes:
-      # REQUIRED: Docker socket for container orchestration
       - /var/run/docker.sock:/var/run/docker.sock
-      # Persistent data directory (GUI config, session history, WireGuard configs)
       - ./data:/data
     environment:
-      # All GUI data files will live under /data
       - DATA_DIR=/data
-      # Optional: set a long random secret so existing JWTs invalidate after redeploy
-      # - JWT_SECRET=change-me-to-a-long-random-string
-      # Optional: JWT lifetime (e.g. 12h, 7d). Default 24h.
-      # - JWT_EXPIRES_IN=24h
     depends_on:
       gluetun:
-        # Use service_started (not service_healthy) so gluetun-gui always launches
-        # even when Gluetun is still connecting or hasn't been configured yet.
         condition: service_started
-    networks: [ vpn-stack ]
 
 networks:
-  vpn-stack:
+  network:
     driver: bridge
