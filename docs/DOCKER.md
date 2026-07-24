@@ -28,6 +28,8 @@ docker compose up -d
 
 ### Inline example (same layout as repo)
 
+The repo [`docker-compose.yml`](../docker-compose.yml) maps the UI as **`3011:3000`** (open [http://localhost:3011](http://localhost:3011)). The snippet below uses the same host port. Full env catalog: **[ENVIRONMENT.md](ENVIRONMENT.md)**.
+
 ```yaml
 services:
   gluetun:
@@ -41,20 +43,25 @@ services:
       - "8888:8888/tcp" # HTTP proxy
       - "8388:8388/tcp" # Shadowsocks
       - "8388:8388/udp" # Shadowsocks
-    # No env_file — the GUI writes Gluetun env via Docker API; configure VPN in the UI (port 3000).
+    # No env_file — the GUI writes Gluetun env via Docker API; configure VPN in the UI.
 
   gluetun-gui:
     image: raddadengineer/gluetun-gui:latest
     container_name: gluetun-gui
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3011:3000" # host:container — UI at http://localhost:3011
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data
     environment:
       - DATA_DIR=/data
-      # Optional: JWT_SECRET=..., JWT_EXPIRES_IN=24h
+      # Optional:
+      # - JWT_SECRET=change-me
+      # - JWT_EXPIRES_IN=24h
+      # - GLUETUN_CONTAINER_NAME=gluetun
+      # - GUI_AUTOSTART_GLUETUN=on
+      # - CORS_ORIGIN=http://localhost:3011
     depends_on:
       - gluetun
 ```
